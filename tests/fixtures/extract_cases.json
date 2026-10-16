@@ -1,0 +1,7 @@
+[
+  {"name":"明确退款", "text":"我上周买的猫爬架，订单号 MH20260701123，到货就散架了，我要退款", "expected":{"order_id":"MH20260701123","request_type":"退款"}, "solution_keywords":["退款"]},
+  {"name":"换货", "text":"订单 MH20260702001 的猫碗发错颜色了，我想换成白色的", "expected":{"order_id":"MH20260702001","request_type":"换货"}, "solution_keywords":["白色"]},
+  {"name":"维修", "text":"订单 MH20260703002 的自动喂食器无法出粮，请帮我维修", "expected":{"order_id":"MH20260703002","request_type":"维修"}, "solution_keywords":["维修"]},
+  {"name":"订单号缺失", "text":"客服一直不回复我的消息，我要投诉，希望客服尽快回复处理", "expected":{"order_id":null,"request_type":"投诉"}, "solution_keywords":["回复"]},
+  {"name":"诉求模糊", "text":"我买的东西用着不太对劲，你们能告诉我该怎么办吗？我还没想好要怎么处理", "expected":{"order_id":null,"request_type":"其他"}, "solution_keywords":[]}
+]
