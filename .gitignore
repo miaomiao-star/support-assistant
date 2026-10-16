@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+# Local API credentials
+.env
+work/
+.pytest_cache/
