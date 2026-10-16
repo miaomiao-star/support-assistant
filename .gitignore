@@ -6,3 +6,18 @@ __pycache__/
 .env
 work/
 .pytest_cache/
+dev-notes/ch01-evaluation-initial.json
+dev-notes/ch01-evaluation.json
+dev-notes/ch01.md
+dev-notes/HANDOFF.md
+specs/ch01/plan.md
+specs/ch01/spec.md
+
+# Local-only project metadata and development records
+/.python-version
+/pyproject.toml
+/uv.lock
+/src/mewhelp/
+/specs/
+/dev-notes/
+/AGENTS.md
