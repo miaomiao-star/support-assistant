@@ -1,0 +1,8 @@
+[
+  {"id":"logistics","message":"订单 1001 的物流到哪了","tool":"query_logistics","mock":true},
+  {"id":"faq_hit","message":"退货政策是什么","tool":"query_faq","keyword":"退货政策","hit":true},
+  {"id":"faq_miss","message":"邮费是多少","tool":"query_faq","keyword":"邮费","hit":false},
+  {"id":"order","message":"查询订单 1001 的状态","tool":"query_order","mock":true},
+  {"id":"product","message":"帮我查询猫粮的价格和库存","tool":"query_product","mock":true},
+  {"id":"ticket","message":"商品损坏了，请帮我创建售后人工工单，描述为猫爬架到货散架","tool":"create_ticket"}
+]
