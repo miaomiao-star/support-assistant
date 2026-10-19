@@ -1,0 +1,37 @@
+name: mewhelp
+
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请通过 .env.mysql 设置管理员密码}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:?请设置数据库名}
+      MYSQL_USER: ${MYSQL_USER:?请设置应用用户名}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请设置应用密码}
+    # 仅供本机开发连接，避免直接暴露到局域网。
+    ports:
+      - "127.0.0.1:3306:3306"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    volumes:
+      # 数据独立保存在 D 盘；删除容器不会删除此目录。
+      - type: bind
+        source: D:/data/docker/mewhelp/mysql
+        target: /var/lib/mysql
+      # 首次空库初始化：先建表，再导入 FAQ；原 SQL 文件不改名。
+      - type: bind
+        source: ./sql/ch02-ddl.sql
+        target: /docker-entrypoint-initdb.d/001_schema.sql
+        read_only: true
+      - type: bind
+        source: ./sql/ch02-seed.sql
+        target: /docker-entrypoint-initdb.d/002_seed.sql
+        read_only: true
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s

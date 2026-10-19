@@ -14,10 +14,9 @@ specs/ch01/plan.md
 specs/ch01/spec.md
 
 # Local-only project metadata and development records
-/.python-version
-/pyproject.toml
-/uv.lock
-/src/mewhelp/
 /specs/
 /dev-notes/
 /AGENTS.md
+
+# Local MySQL credentials
+.env.mysql
