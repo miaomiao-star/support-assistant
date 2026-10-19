@@ -34,8 +34,11 @@ def chat(base_url: str, session_id: str, message: str) -> dict:
                 done = True
                 break
             data = json.loads(payload)
-            if "error" in data:
+            if data.get("error") and "message" in data:
                 raise RuntimeError(data["message"])
+            # Ch02 新增工具状态事件；旧验收只统计最终文本增量。
+            if "delta" not in data:
+                continue
             chunks.append(data["delta"])
             arrival_seconds.append(round(time.monotonic() - started, 3))
     if not done or not chunks:

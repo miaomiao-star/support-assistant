@@ -1,7 +1,7 @@
 import asyncio
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from app.core.memory import BudgetExceeded, SessionStore, estimate_tokens, prepare_messages
 
@@ -54,3 +54,19 @@ def test_same_session_lock_serializes_requests():
         await asyncio.gather(work(1), work(2))
         assert events == [(1, "start"), (1, "end"), (2, "start"), (2, "end")]
     asyncio.run(run())
+
+
+def test_tool_group_trim_never_leaves_orphan_messages():
+    call = {'name': 'query_order', 'args': {'order_id': '1001'}, 'id': 'c'}
+    old = [HumanMessage(content='查订单'), AIMessage(content='', tool_calls=[call]),
+           ToolMessage(content='长' * 100, tool_call_id='c'), AIMessage(content='答复')]
+    recent = [HumanMessage(content='你好'), AIMessage(content='您好')]
+    result = prepare_messages(old + recent, '继续', '客服', 40, 1.2)
+    assert [m.type for m in result] == ['system', 'human', 'ai', 'human']
+    assert result[1].content == '你好'
+
+
+def test_tool_arguments_count_in_budget():
+    short = AIMessage(content='', tool_calls=[{'name': 'query_order', 'args': {'order_id': '1'}, 'id': 'c'}])
+    long = AIMessage(content='', tool_calls=[{'name': 'query_order', 'args': {'order_id': '1' * 100}, 'id': 'c'}])
+    assert estimate_tokens([long]) > estimate_tokens([short])

@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     zh_chars_pre_token: float = Field(
         default=1.2, validation_alias="ZH_CHARS_PRE_TOKEN", gt=0, allow_inf_nan=False
     )
+    # 原预算控制文本历史；新增总预算覆盖工具协议及返回数据。
+    # service 会先从总预算预留工具定义，再按较小的文本额度保留历史。
+    # 这些值限制“发送给模型的输入”，并不限制回答字数或模型总运行时间。
+    tool_context_budget: int = Field(default=8000, gt=0)
+    # 这是单次工具执行超时；只读是否重试由 ToolRegistry 决定。
+    tool_timeout_seconds: float = Field(default=5, gt=0, le=60)
 
 
 @lru_cache

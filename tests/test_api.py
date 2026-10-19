@@ -9,12 +9,18 @@ from app.config import Settings, get_settings
 from app.core.llm import get_chat_model, get_extract_chain
 from app.main import create_app
 from app.schemas.extract import AfterSalesTicket
+from app.db import Database
+from app.models import Base
+from app.repositories.chat import ChatRepository
 
 
 class FakeLLM:
     def __init__(self):
         self.calls = []
         self.fail = False
+
+    def bind_tools(self, tools, **kwargs):
+        return self
 
     async def astream(self, prompt):
         self.calls.append(prompt.to_messages())
@@ -35,12 +41,17 @@ def api(monkeypatch):
     settings = Settings(_env_file=None, CHAT_API_KEY="fake-test-key",
                         CHAT_BASE_URL="https://example.invalid/v1", CHAT_MODEL="fake")
     monkeypatch.setattr("app.main.get_settings", lambda: settings)
-    app = create_app()
+    database = Database('sqlite+aiosqlite://')
+    app = create_app(database)
     app.dependency_overrides[get_settings] = lambda: settings
     fake = FakeLLM()
     app.dependency_overrides[get_chat_model] = lambda: fake
     app.dependency_overrides[get_extract_chain] = lambda: FakeExtract()
     with TestClient(app) as client:
+        async def initialize():
+            async with database.engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
+        client.portal.call(initialize)
         yield client, app, fake
 
 
@@ -123,6 +134,8 @@ def test_blank_inputs(api, path, data):
 def test_empty_model_reply_is_error_and_not_saved(api):
     client, app, _ = api
     class Empty:
+        def bind_tools(self, tools, **kwargs):
+            return self
         async def astream(self, prompt):
             yield AIMessageChunk(content="")
     app.dependency_overrides[get_chat_model] = lambda: Empty()
@@ -144,6 +157,8 @@ def test_cancelled_stream_releases_lock_without_commit():
                             CHAT_BASE_URL="https://example.invalid/v1", CHAT_MODEL="fake")
         class Closable:
             closed = False
+            def bind_tools(self, tools, **kwargs):
+                return self
             async def astream(self, prompt):
                 try:
                     yield AIMessageChunk(content="部分回复")
@@ -151,12 +166,18 @@ def test_cancelled_stream_releases_lock_without_commit():
                 finally:
                     self.closed = True
         fake = Closable()
-        response = await chat(ChatRequest(session_id="s", message="你好"), request, settings, fake)
+        from unittest.mock import AsyncMock
+        repo = AsyncMock()
+        repo.open_conversation.return_value = 1
+        repo.history.return_value = []
+        response = await chat(ChatRequest(session_id="s", message="你好"), request, settings, fake, repo)
         iterator = response.body_iterator
         await anext(iterator)
         await iterator.aclose()
         assert store.history("s") == []
         assert not store.lock("s").locked()
         assert fake.closed
+        # 用户输入保留，半截助手回复不落库。
+        assert repo.add_messages.await_count == 1
     from app.schemas.chat import ChatRequest
     asyncio.run(run())

@@ -1,6 +1,7 @@
 """单进程会话存储。预算是字符估算值，不是模型 tokenizer 的精确值。"""
 
 import asyncio
+import json
 from math import ceil
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, trim_messages
@@ -16,8 +17,16 @@ def estimate_tokens(messages: list[BaseMessage], chars_per_token: float = 1.2) -
 
     4 是本项目经验值，不是服务商计费规则。英文、中文和真实分词存在差异。
     """
-    # 每条消息计入角色/协议开销；仅支持本章使用的文本消息。
-    return sum(4 + ceil(len(str(message.content)) / chars_per_token) for message in messages)
+    # 工具参数和结果也占上下文；仍是字符估算，不是精确 tokenizer。
+    total = 0
+    for message in messages:
+        content = str(message.content)
+        if getattr(message, 'tool_calls', None):
+            # 文本正文可能为空，但申请里的工具名、参数 JSON 仍然占用上下文。
+            content += json.dumps(message.tool_calls, ensure_ascii=False)
+        content += getattr(message, 'tool_call_id', '')
+        total += 4 + ceil(len(content) / chars_per_token)
+    return total
 
 
 def prepare_messages(
@@ -29,33 +38,51 @@ def prepare_messages(
     current = HumanMessage(content=message)
     if estimate_tokens([system_message, current], chars_per_token) > budget:
         raise BudgetExceeded("当前消息与系统提示词超过上下文预算，请缩短消息或提高 LLM_TOKEN_BUDGET")
-    retained = trim_messages(
-        # 先为当前消息留预算，再裁历史，避免用户本轮问题被静默删除。
-        [system_message, *history],
-        max_tokens=budget - estimate_tokens([current], chars_per_token),
-        token_counter=lambda messages: estimate_tokens(messages, chars_per_token),
-        strategy="last", include_system=True, start_on="human", end_on="ai",
-        # last 留最近消息；首尾分别为 human/ai，避免只保留孤立的回复。
-        allow_partial=False,
-    )
-    # 空历史或所有历史被裁剪时，显式保留 system。
-    if not retained or not isinstance(retained[0], SystemMessage):
-        retained = [system_message, *retained]
-    return [*retained, current]
+    # 单条消息完整不等于工具回合完整，按 user 到最终 assistant 分组裁剪。
+    groups, group, pending = [], [], set()
+    # 例如 [human, ai(申请), tool(结果), ai(回答)] 要作为一组保留/删除。
+    # pending 防止在工具结果尚未齐全时，把中间状态误当成完整问答。
+    for item in history:
+        if item.type == 'human':
+            group, pending = [item], set()
+        elif group:
+            group.append(item)
+            if item.type == 'tool':
+                pending.discard(item.tool_call_id)
+            elif getattr(item, 'tool_calls', None):
+                pending.update(call['id'] for call in item.tool_calls)
+            elif item.type == 'ai' and not pending:
+                groups.append(group)
+                group = []
+    retained = []
+    for group in reversed(groups):
+        # 从最近回合向前放；某组放不下就停止，不只保留它的尾部助手消息。
+        if estimate_tokens([system_message, *group, *retained, current], chars_per_token) > budget:
+            break
+        retained = [*group, *retained]
+    return [system_message, *retained, current]
 
 
 class SessionStore:
     """内存版会话仓库；锁只协调本进程，本章未做会话过期与总数限制。"""
     def __init__(self) -> None:
+        """
+        兼容第一章的内存历史接口；Ch02 聊天路径只依赖 _locks，
+        _histories/history()/commit() 不再是新接口的历史数据来源。
+        """
         self._histories: dict[str, list[BaseMessage]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
 
     def history(self, session_id: str) -> list[BaseMessage]:
-        # 返回浅拷贝，调用方改列表不会改变仓库；消息对象本身仍共享。
+        """
+        返回浅拷贝，调用方改列表不会改变仓库；消息对象本身仍共享。
+        """
         return list(self._histories.get(session_id, []))
 
     def lock(self, session_id: str) -> asyncio.Lock:
-        # 同一会话复用同一把锁；不同会话可以同时请求上游。
+        """
+        同一会话复用同一把锁；不同会话可以同时请求上游。
+        """
         return self._locks.setdefault(session_id, asyncio.Lock())
 
     def commit(
