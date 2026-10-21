@@ -24,7 +24,8 @@ def get_repository(request: Request):
     Depends 每次请求调用这里，注入轻量仓库对象。
     仓库共享的是引擎/Session 工厂，不是把一个打开的事务共享给所有请求。
     """
-    return ChatRepository(request.app.state.database)
+    # 仓库按请求创建，但注入应用共享的知识服务，避免每轮重新建立Milvus客户端。
+    return ChatRepository(request.app.state.database, request.app.state.knowledge)
 
 
 def sse_frame(data: dict | str, event: str | None = None) -> str:

@@ -43,7 +43,7 @@ def build_tools(context):
 
     @tool(args_schema=FAQInput)
     async def query_faq(keyword: str) -> dict:
-        """用原话关键词 LIKE 查 FAQ 问题；不做同义改写，空列表即未命中。"""
+        """用用户原话语义检索知识库中的政策、FAQ和使用说明；空列表即未命中。"""
         # 数据访问细节留在 repository，本工具只转交已校验的业务参数。
         # ok=True 表示查询执行成功；data=[] 表示没有匹配记录，两者不矛盾。
         return dict(ok=True, data=await context.repo.query_faq(keyword))

@@ -8,6 +8,10 @@ from app.api.extract import router as extract_router
 from app.config import get_settings
 from app.core.memory import SessionStore
 from app.db import Database, DatabaseSettings
+from app.api.kb import router as kb_router
+from app.knowledge.runtime import build_service, ROOT
+from app.knowledge.jobs import Jobs
+from fastapi.responses import FileResponse
 
 
 def create_app(database: Database | None = None) -> FastAPI:
@@ -21,11 +25,17 @@ def create_app(database: Database | None = None) -> FastAPI:
         # 测试可传入独立 database；真实启动读取 .env.mysql 创建异步 MySQL 引擎。
         # 挂到 app.state 的是应用共享资源，不是某个浏览器的聊天历史。
         application.state.database = database or Database(DatabaseSettings().url())
+        # 本章知识服务在应用内共享，聊天与管理页使用相同模型、向量库和阈值。
+        application.state.knowledge = build_service(application.state.database)
+        application.state.kb_jobs = Jobs(ROOT / 'work' / 'ch03' / ('test' if database else 'web'))
         try:
             # 只检查连通性，不在应用启动时重建业务表。
             await application.state.database.check()
             yield
         finally:
+            # 先收敛后台任务，再关闭其依赖的向量连接和数据库，避免使用已关闭资源。
+            await application.state.kb_jobs.close()
+            await application.state.knowledge.vectors.close()
             # 正常关闭或启动检查失败，都清理已经创建的数据库引擎。
             await application.state.database.close()
     # lifespan是FastAPI的生命周期管理器，允许在应用启动和关闭时执行特定的代码。
@@ -37,6 +47,11 @@ def create_app(database: Database | None = None) -> FastAPI:
     # 这里只使用单进程会话锁；真实聊天历史由数据库仓库读取。
     application.include_router(chat_router, prefix="/api", tags=["chat"])
     application.include_router(extract_router, prefix="/api", tags=["extract"])
+    application.include_router(kb_router, prefix='/api')
+    @application.get('/kb', include_in_schema=False)
+    async def knowledge_page():
+        """明确页面路由先于首页静态回退，避免 /kb 被首页吞掉。"""
+        return FileResponse(Path(__file__).resolve().parent / 'static' / 'kb.html')
     application.frontend("/", directory=Path(__file__).resolve().parent / "static")
     # 静态页与 API 同源，前端可用 /api/chat，无需跨域配置。
     return application

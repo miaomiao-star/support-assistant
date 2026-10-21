@@ -25,12 +25,18 @@ class Settings(BaseSettings):
     chat_base_url: str = Field(validation_alias="CHAT_BASE_URL", min_length=1)
     chat_model: str = Field(validation_alias="CHAT_MODEL", min_length=1)
     # 本章未启用 embedding / rerank，因此这两组允许不填写。
+    # Ch03补充：embedding已用于知识库；此处保留可选声明，真正调用时由LazyEmbeddings校验。
+    # rerank仍未启用。浏览材料和读取状态无需先初始化嵌入客户端。
     embed_api_key: SecretStr | None = Field(default=None, validation_alias="EMBED_API_KEY")
     embed_base_url: str | None = Field(default=None, validation_alias="EMBED_BASE_URL")
     embed_model: str | None = Field(default=None, validation_alias="EMBED_MODEL")
     rerank_api_key: SecretStr | None = Field(default=None, validation_alias="RERANK_API_KEY")
     rerank_base_url: str | None = Field(default=None, validation_alias="RERANK_BASE_URL")
     rerank_model: str | None = Field(default=None, validation_alias="RERANK_MODEL")
+    # Lite独立服务的连接地址；缺省地址在knowledge/runtime.py中选用本机19530端口。
+    milvus_uri: str | None = Field(default=None, validation_alias='MILVUS_URI')
+    # dense 分数下限须结合标注集校准；不引入关键词召回或重排。
+    kb_score_threshold: float = Field(default=0.5, ge=-1, le=1)
     llm_token_budget: int = Field(default=2000, validation_alias="LLM_TOKEN_BUDGET", gt=0)
     # gt=0 要求正数；这是输入上下文预算，不是输出长度上限。
     # 保留现有 .env 中的 PRE 拼写。

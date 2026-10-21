@@ -38,8 +38,9 @@ def decode_message(row):
 
 class ChatRepository:
     # 仓库负责持久化与查询，不选择工具，不生成用户回答，也不负责 SSE。
-    def __init__(self, db):
+    def __init__(self, db, knowledge=None):
         self.db = db
+        self.knowledge = knowledge
 
     async def open_conversation(self, session_id):
         """
@@ -110,17 +111,12 @@ class ChatRepository:
         return complete
 
     async def query_faq(self, keyword):
-        """
-        只读用 sessions()，读取完成关闭即可，不需要提交业务写入。
-        """
-        async with self.db.sessions() as session:
-            # contains(autoescape=True) 生成参数化 LIKE，%/_ 不变成通配符。
-            # 例如“退货政策”相当于按字面查 %退货政策%；不拼接原始 SQL。
-            # 只匹配 question、不扩展同义词，所以“邮费”不会匹配“运费怎么算”。
-            rows = await session.scalars(select(FAQ).where(
-                FAQ.question.contains(keyword, autoescape=True)).order_by(FAQ.id).limit(5))
-            # 在 Session 关闭前取出字段，返回普通 dict，避免上层依赖 ORM 对象状态。
-            return [dict(id=r.id, question=r.question, answer=r.answer, category=r.category) for r in rows]
+        """Ch03：dense 召回主键，再从 MySQL 读取原文，保留原返回契约。"""
+        if self.knowledge is None:
+            from app.knowledge.runtime import build_service
+            self.knowledge = build_service(self.db)
+        # 沿用keyword原话参数和四字段返回；向量服务故障交给原工具错误流程，不回退LIKE。
+        return await self.knowledge.search(keyword)
 
     async def record_tool_result(self, cid, call_id, result, after_message_id=0):
         """
