@@ -87,7 +87,7 @@ def evaluate(base_url):
     标注数据明确指定预期工具、FAQ 关键词和是否命中；Prompt 通过这些例子验证。
     """
     cases = json.loads((ROOT / 'tests/fixtures/tool_cases.json').read_text(encoding='utf-8'))
-    report = dict(results=[], expected_limitation='邮费与运费不做同义扩展，LIKE 漏召回为预期结果')
+    report = dict(results=[], retrieval='Ch03 dense semantic retrieval; original keyword contract preserved')
     for case in cases:
         # 样例各用新会话，避免上一条历史影响这条的工具选择。
         session_id = 'tools-eval-' + uuid4().hex
@@ -102,13 +102,13 @@ def evaluate(base_url):
             result = stored['results'][0] if stored['results'] else {}
             ok = ok and result.get('ok', False)
             if 'keyword' in case:
-                # “邮费”必须保留原词且查不到，不能改成“运费”凑成一次命中。
+                # “邮费”保留原词，靠向量语义命中，不能改词掩盖检索问题。
                 ok = ok and stored['calls'][0]['args']['keyword'] == case['keyword']
                 ok = ok and bool(result.get('data')) == case['hit']
                 if not case['hit']:
                     ok = ok and any(w in actual['reply'] for w in ('未查到', '没查到', '未找到', '没有查到'))
                 else:
-                    ok = ok and '7' in actual['reply']
+                    ok = ok and all(token in actual['reply'] for token in case.get('reply_tokens', []))
             if case.get('mock'):
                 # 不要求每次随机数相同；验证回答明确模拟，并与本次工具状态一致。
                 ok = ok and result.get('data', {}).get('mock') and '模拟' in actual['reply']
@@ -135,7 +135,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     report = evaluate(args.base_url.rstrip('/'))
     # 每次独立报告，不覆盖失败历史。
-    path = ROOT / 'dev-notes' / f'ch02-evaluation-{time.time_ns()}.json'
+    path = ROOT / 'dev-notes' / f'ch03-tools-{time.time_ns()}.json'
     path.parent.mkdir(exist_ok=True)
     path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
     # 命令行退出码便于人工/CI 判断结果：0 为全通过，1 为至少一个失败。

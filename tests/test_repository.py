@@ -25,19 +25,21 @@ async def repository():
     return db, ChatRepository(db)
 
 
-def test_faq_literal_like_and_expected_miss():
-    """
-    对照四种输入：正常命中、预期同义词漏召回、通配符转义、SQL 注入文本。
-    """
+def test_faq_uses_semantic_service_without_changing_contract():
     async def run():
+        from unittest.mock import AsyncMock
         db, repo = await repository()
+        expected=[dict(id=10,question='运费怎么算',answer='满99包邮',category='物流')]
+        service=AsyncMock()
+        service.search.return_value=expected
+        repo.knowledge=service
         try:
-            assert len(await repo.query_faq('退货政策')) == 1
-            assert await repo.query_faq('邮费') == []
-            assert await repo.query_faq('%') == []
-            assert await repo.query_faq("' OR 1=1 --") == []
-        finally:
-            await db.close()
+            assert await repo.query_faq('邮费') == expected
+            service.search.assert_awaited_once_with('邮费')
+            service.search.side_effect=ConnectionError('unavailable')
+            import pytest
+            with pytest.raises(ConnectionError): await repo.query_faq('退货政策')
+        finally: await db.close()
     asyncio.run(run())
 
 
