@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse
 
 def create_app(database: Database | None = None) -> FastAPI:
     """组装应用；工厂形式让测试能创建彼此独立的应用和会话存储。"""
+
     @asynccontextmanager
     async def lifespan(application: FastAPI):
         """
@@ -26,8 +27,18 @@ def create_app(database: Database | None = None) -> FastAPI:
         # 挂到 app.state 的是应用共享资源，不是某个浏览器的聊天历史。
         application.state.database = database or Database(DatabaseSettings().url())
         # 本章知识服务在应用内共享，聊天与管理页使用相同模型、向量库和阈值。
-        application.state.knowledge = build_service(application.state.database)
-        application.state.kb_jobs = Jobs(ROOT / 'work' / 'ch03' / ('test' if database else 'web'))
+        # 显式传入测试数据库时保留隔离的Ch03假依赖；真实应用按迁移开关选择索引。
+        application.state.knowledge = build_service(
+            application.state.database, rag_enabled=False if database else None
+        )
+        application.state.rag = (
+            application.state.knowledge
+            if application.state.knowledge.retriever
+            else None
+        )
+        application.state.kb_jobs = Jobs(
+            ROOT / 'work' / 'ch03' / ('test' if database else 'web')
+        )
         try:
             # 只检查连通性，不在应用启动时重建业务表。
             await application.state.database.check()
@@ -35,9 +46,10 @@ def create_app(database: Database | None = None) -> FastAPI:
         finally:
             # 先收敛后台任务，再关闭其依赖的向量连接和数据库，避免使用已关闭资源。
             await application.state.kb_jobs.close()
-            await application.state.knowledge.vectors.close()
+            await application.state.knowledge.close()
             # 正常关闭或启动检查失败，都清理已经创建的数据库引擎。
             await application.state.database.close()
+
     # lifespan是FastAPI的生命周期管理器，允许在应用启动和关闭时执行特定的代码。
     application = FastAPI(title="MewHelp", version="0.1.0", lifespan=lifespan)
     application.state.sessions = SessionStore()
@@ -48,10 +60,17 @@ def create_app(database: Database | None = None) -> FastAPI:
     application.include_router(chat_router, prefix="/api", tags=["chat"])
     application.include_router(extract_router, prefix="/api", tags=["extract"])
     application.include_router(kb_router, prefix='/api')
+
     @application.get('/kb', include_in_schema=False)
     async def knowledge_page():
         """明确页面路由先于首页静态回退，避免 /kb 被首页吞掉。"""
         return FileResponse(Path(__file__).resolve().parent / 'static' / 'kb.html')
+
+    @application.get('/kb/source/{key}', include_in_schema=False)
+    async def source_page(key: int):
+        # 页面模板不接收文件路径，浏览器再按数字主键向原文API读取内容。
+        return FileResponse(Path(__file__).resolve().parent / 'static' / 'source.html')
+
     application.frontend("/", directory=Path(__file__).resolve().parent / "static")
     # 静态页与 API 同源，前端可用 /api/chat，无需跨域配置。
     return application

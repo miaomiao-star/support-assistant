@@ -41,7 +41,8 @@ def sse_frame(data: dict | str, event: str | None = None) -> str:
 
 @router.post("/chat", response_class=StreamingResponse)
 async def chat(
-    body: ChatRequest, request: Request,
+    body: ChatRequest,
+    request: Request,
     settings: Annotated[Settings, Depends(get_settings)],
     model=Depends(get_chat_model),
     repo=Depends(get_repository),
@@ -58,8 +59,13 @@ async def chat(
     store = request.app.state.sessions
     try:
         # 在发送响应头之前检查当前输入。开始流以后无法改 HTTP 状态为 422。
-        prepare_messages([], body.message, CUSTOMER_SERVICE_SYSTEM,
-                         settings.llm_token_budget, settings.zh_chars_pre_token)
+        prepare_messages(
+            [],
+            body.message,
+            CUSTOMER_SERVICE_SYSTEM,
+            settings.llm_token_budget,
+            settings.zh_chars_pre_token,
+        )
     except BudgetExceeded as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
 
@@ -71,19 +77,29 @@ async def chat(
             # 锁覆盖整个生成过程，避免同一会话的并发问答顺序交错。
             try:
                 service = ChatService(
-                    repo, model, text_budget=settings.llm_token_budget,
+                    repo,
+                    model,
+                    text_budget=settings.llm_token_budget,
                     tool_budget=settings.tool_context_budget,
                     chars_per_token=settings.zh_chars_pre_token,
                     tool_timeout=settings.tool_timeout_seconds,
+                    rag=getattr(request.app.state, 'rag', None),
+                    filters=body.filters.model_dump(exclude_none=True),
                 )
                 # aclosing 保证页面断开时关闭内层生成器及其上游模型流。
-                async with aclosing(service.stream(body.session_id, body.message)) as events:
+                async with aclosing(
+                    service.stream(body.session_id, body.message)
+                ) as events:
                     async for event in events:
                         # service 产生内部 dict 事件；HTTP/SSE 格式在 API 层转换。
                         # tool 走命名事件，delta 延用原文本事件，前端分别处理。
-                        if event['type'] == 'tool':
+                        if event['type'] in ('tool', 'citations'):
+                            # 引用使用独立事件，不掺进delta正文；旧客户端仍能按类型忽略它。
                             # type 只供后端分流使用，剩下 name/call_id/status/error 给页面。
-                            yield sse_frame({k: v for k, v in event.items() if k != 'type'}, 'tool')
+                            yield sse_frame(
+                                {k: v for k, v in event.items() if k != 'type'},
+                                event['type'],
+                            )
                         else:
                             yield sse_frame({'delta': event['delta']})
                         await asyncio.sleep(0)
@@ -94,10 +110,17 @@ async def chat(
                 # asyncio.CancelledError 不在普通 Exception 范围内，会向外传播。
                 # 不回显上游异常文本：其中可能含请求头、URL 或其他敏感内容。
                 logger.warning("Chat upstream failure: %s", type(exc).__name__)
-                yield sse_frame({"error": "upstream_error", "message": "本轮服务调用失败，请稍后重试；已完成的工具操作会保留记录"}, "error")
+                yield sse_frame(
+                    {
+                        "error": "upstream_error",
+                        "message": "本轮服务调用失败，请稍后重试；已完成的工具操作会保留记录",
+                    },
+                    "error",
+                )
 
     return StreamingResponse(
         # Response 逐步消费 stream()；禁缓存/禁代理缓冲有助于及时送达。
-        stream(), media_type="text/event-stream",
+        stream(),
+        media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

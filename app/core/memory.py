@@ -4,11 +4,17 @@ import asyncio
 import json
 from math import ceil
 
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, trim_messages
+from langchain_core.messages import (
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    trim_messages,
+)
 
 
 class BudgetExceeded(ValueError):
     """无法保留 system 和当前消息时抛出，由 API 转换为 422。"""
+
     pass
 
 
@@ -30,14 +36,19 @@ def estimate_tokens(messages: list[BaseMessage], chars_per_token: float = 1.2) -
 
 
 def prepare_messages(
-    history: list[BaseMessage], message: str, system: str,
-    budget: int, chars_per_token: float,
+    history: list[BaseMessage],
+    message: str,
+    system: str,
+    budget: int,
+    chars_per_token: float,
 ) -> list[BaseMessage]:
     """准备一次请求的输入：[system, 最近完整历史轮次..., 当前 human]。"""
     system_message = SystemMessage(content=system)
     current = HumanMessage(content=message)
     if estimate_tokens([system_message, current], chars_per_token) > budget:
-        raise BudgetExceeded("当前消息与系统提示词超过上下文预算，请缩短消息或提高 LLM_TOKEN_BUDGET")
+        raise BudgetExceeded(
+            "当前消息与系统提示词超过上下文预算，请缩短消息或提高 LLM_TOKEN_BUDGET"
+        )
     # 单条消息完整不等于工具回合完整，按 user 到最终 assistant 分组裁剪。
     groups, group, pending = [], [], set()
     # 例如 [human, ai(申请), tool(结果), ai(回答)] 要作为一组保留/删除。
@@ -57,7 +68,12 @@ def prepare_messages(
     retained = []
     for group in reversed(groups):
         # 从最近回合向前放；某组放不下就停止，不只保留它的尾部助手消息。
-        if estimate_tokens([system_message, *group, *retained, current], chars_per_token) > budget:
+        if (
+            estimate_tokens(
+                [system_message, *group, *retained, current], chars_per_token
+            )
+            > budget
+        ):
             break
         retained = [*group, *retained]
     return [system_message, *retained, current]
@@ -65,6 +81,7 @@ def prepare_messages(
 
 class SessionStore:
     """内存版会话仓库；锁只协调本进程，本章未做会话过期与总数限制。"""
+
     def __init__(self) -> None:
         """
         兼容第一章的内存历史接口；Ch02 聊天路径只依赖 _locks，
@@ -86,17 +103,28 @@ class SessionStore:
         return self._locks.setdefault(session_id, asyncio.Lock())
 
     def commit(
-        self, session_id: str, messages: list[BaseMessage], *, system: str = "",
-        budget: int = 2000, chars_per_token: float = 1.2,
+        self,
+        session_id: str,
+        messages: list[BaseMessage],
+        *,
+        system: str = "",
+        budget: int = 2000,
+        chars_per_token: float = 1.2,
     ) -> None:
         """完整生成成功后保存历史，并再次裁剪，避免单个会话无限增长。
 
         若一个完整问答轮次太长而放不下，整轮会被丢弃，而非截断回复。
         """
         retained = trim_messages(
-            [SystemMessage(content=system), *messages], max_tokens=budget,
+            [SystemMessage(content=system), *messages],
+            max_tokens=budget,
             token_counter=lambda items: estimate_tokens(items, chars_per_token),
-            strategy="last", include_system=True, start_on="human", end_on="ai",
+            strategy="last",
+            include_system=True,
+            start_on="human",
+            end_on="ai",
             allow_partial=False,
         )
-        self._histories[session_id] = [m for m in retained if not isinstance(m, SystemMessage)]
+        self._histories[session_id] = [
+            m for m in retained if not isinstance(m, SystemMessage)
+        ]

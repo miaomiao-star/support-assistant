@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN"
+  ><meta charset="utf-8" /><meta
+    name="viewport"
+    content="width=device-width,initial-scale=1"
+  /><title>知识原文 · MewHelp</title>
+  <style>
+    body {
+      max-width: 880px;
+      margin: 50px auto;
+      padding: 0 24px;
+      font: 16px/1.9 system-ui;
+      color: #244239;
+      background: #fafbf8;
+    }
+    pre {
+      white-space: pre-wrap;
+      font: inherit;
+      background: white;
+      padding: 24px;
+      border: 1px solid #dde7df;
+      border-radius: 12px;
+    }
+    p {
+      color: #718377;
+    }
+    a {
+      color: #326f57;
+    }
+  </style>
+  <a href="/kb">← 返回知识库</a
+  ><h1>引用来源原文</h1
+  ><p id="path">正在读取…</p
+  ><h2 id="question"></h2
+  ><pre id="answer"></pre>
+  <script>
+    // 只用URL末尾的数字主键读取API，原文作为文本展示，不执行材料中的HTML。
+    // 该页面定位的是MySQL知识块，不把用户输入解释成服务器磁盘文件路径。
+    const key = location.pathname.split("/").pop();
+    fetch("/api/kb/source/" + encodeURIComponent(key))
+      .then(async (r) => {
+        if (!r.ok) throw Error("知识原文不存在");
+        return r.json();
+      })
+      .then((r) => {
+        document.querySelector("#path").textContent =
+          r.section_path || "历史对话抽取 / 知识" + r.id;
+        document.querySelector("#question").textContent = r.questions;
+        document.querySelector("#answer").textContent = r.answer;
+      })
+      .catch((e) => (document.querySelector("#path").textContent = e.message));
+  </script></html
+>

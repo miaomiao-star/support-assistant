@@ -1,7 +1,18 @@
 """四张表的 ORM 映射，真实建表仍以 sql/ch02-ddl.sql 为准。"""
+
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Integer, JSON, String, Text, func
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Integer,
+    JSON,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.dialects.mysql import BIGINT
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -15,7 +26,11 @@ class Base(DeclarativeBase):
 # SQLite 仅用于隔离单测；MySQL 生产映射保持 UNSIGNED BIGINT。
 # with_variant 按数据库方言切换列类型；SQLite 自增主键需要 INTEGER，
 # 并不是应用运行时在 MySQL 和 SQLite 之间自动切换。
-ID = BigInteger().with_variant(BIGINT(unsigned=True), 'mysql').with_variant(Integer, 'sqlite')
+ID = (
+    BigInteger()
+    .with_variant(BIGINT(unsigned=True), 'mysql')
+    .with_variant(Integer, 'sqlite')
+)
 
 
 class Conversation(Base):
@@ -27,11 +42,15 @@ class Conversation(Base):
     # 当前保存完整会话摘要用于碰撞核验，还不是账号系统中的真实用户 ID。
     user_id: Mapped[str] = mapped_column(String(64), index=True)
     # default 由 ORM 插入时提供；真实表 SQL 中也有 DEFAULT，两者应保持一致。
-    status: Mapped[str] = mapped_column(Enum('进行中', '已转人工', '已结束'), default='进行中')
+    status: Mapped[str] = mapped_column(
+        Enum('进行中', '已转人工', '已结束'), default='进行中'
+    )
     # server_default 由数据库产生时间；onupdate 是 ORM 更新此行时带上的值。
     # DateTime 对应既有 DATETIME，不携带时区；当前没有做时间显示的时区转换。
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
 
 
 class Message(Base):
@@ -40,7 +59,9 @@ class Message(Base):
     __tablename__ = 'messages'
     id: Mapped[int] = mapped_column(ID, primary_key=True, autoincrement=True)
     # 外键要求所属会话存在；索引帮助按会话查询流水，不会自动加载聊天历史。
-    conversation_id: Mapped[int] = mapped_column(ID, ForeignKey('conversations.id'), index=True)
+    conversation_id: Mapped[int] = mapped_column(
+        ID, ForeignKey('conversations.id'), index=True
+    )
     role: Mapped[str] = mapped_column(Enum('user', 'assistant', 'tool'))
     # 纯工具申请可能没有正文，所以允许 NULL；TEXT 的容量也不是无限的。
     content: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -60,14 +81,18 @@ class FAQ(Base):
     answer: Mapped[str] = mapped_column(Text)
     category: Mapped[str] = mapped_column(String(64), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
 
 
 class Ticket(Base):
     # 工单使用业务工单号作为主键；一次创建必须关联已经存在的会话。
     __tablename__ = 'tickets'
     ticket_no: Mapped[str] = mapped_column(String(32), primary_key=True)
-    conversation_id: Mapped[int] = mapped_column(ID, ForeignKey('conversations.id'), index=True)
+    conversation_id: Mapped[int] = mapped_column(
+        ID, ForeignKey('conversations.id'), index=True
+    )
     description: Mapped[str] = mapped_column(Text)
     # 类型由工具参数 Schema 限定，数据库 ENUM 再约束可存储值。
     ticket_type: Mapped[str] = mapped_column(Enum('售后', '投诉', '咨询'))

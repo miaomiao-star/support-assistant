@@ -29,7 +29,9 @@ def get_extract_chain():
     """
     JSON 模式不引入工具调用；Pydantic 解析校验在 LangChain 内完成。
     """
-    model = get_chat_model().with_structured_output(AfterSalesTicket, method="json_mode")
+    model = get_chat_model().with_structured_output(
+        AfterSalesTicket, method="json_mode"
+    )
     # | 是 LangChain 的流水线：先格式化 Prompt，再请求模型并解析结果。
     # JSON 模式保证方向是 JSON；字段有效性由 Pydantic 校验，事实仍需核对。
     return EXTRACT_PROMPT | model

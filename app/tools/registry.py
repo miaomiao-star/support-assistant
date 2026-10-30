@@ -1,4 +1,5 @@
 """工具白名单、Schema 校验、有限重试及安全错误结果。"""
+
 import asyncio
 import hashlib
 import logging
@@ -15,7 +16,11 @@ logger = logging.getLogger(__name__)
 class ToolRegistry:
     # 每条聊天请求创建一个实例；不是所有用户共用同一个可变的执行上下文。
     def __init__(self, repo, conversation_id, user_text, timeout=5):
-        self.repo, self.conversation_id, self.user_text = repo, conversation_id, user_text
+        self.repo, self.conversation_id, self.user_text = (
+            repo,
+            conversation_id,
+            user_text,
+        )
         self.timeout = timeout
         # tools：名称 → 工具对象；read_only：名称 → 是否允许只读重试。
         # 模型不能靠随意生成一个名字就执行系统函数，只能命中这个白名单。
@@ -55,7 +60,9 @@ class ToolRegistry:
         if name == 'query_faq' and args['keyword'] not in self.user_text:
             # 防止模型把“邮费”改成“运费”，否则会掩盖 LIKE 的同义词漏召回。
             return dict(ok=False, error='keyword_not_literal')
-        if name == 'create_ticket' and not any(w in self.user_text for w in ('人工', '工单')):
+        if name == 'create_ticket' and not any(
+            w in self.user_text for w in ('人工', '工单')
+        ):
             # 当前仅是演示级关键词门槛，并非完整的语义确认、登录或权限校验。
             # 不能把这个分支理解成生产系统已经可靠识别了所有肯定/否定意图。
             return dict(ok=False, error='confirmation_required')
@@ -83,12 +90,16 @@ class ToolRegistry:
                 # 1205/1213 是锁等待超时/死锁，2006/2013 是连接丢失。
                 # 这是示例的有限白名单，不是对所有 OperationalError 一概重试。
                 transient = not isinstance(exc, OperationalError) or (
-                    getattr(exc.orig, 'args', [None])[0] in (1205, 1213, 2006, 2013))
+                    getattr(exc.orig, 'args', [None])[0] in (1205, 1213, 2006, 2013)
+                )
                 if transient and attempt + 1 < attempts:
                     # 短暂让出事件循环后重试，避免失败后立刻连续冲击数据源。
-                    await asyncio.sleep(.05)
+                    await asyncio.sleep(0.05)
                     continue
-                return dict(ok=False, error='timeout' if isinstance(exc, TimeoutError) else 'unavailable')
+                return dict(
+                    ok=False,
+                    error='timeout' if isinstance(exc, TimeoutError) else 'unavailable',
+                )
             except Exception as exc:
                 # 日志只记工具名和异常类型，不回显数据库连接串、参数或上游原文。
                 # asyncio.CancelledError 不属于普通 Exception，会继续向外传播，

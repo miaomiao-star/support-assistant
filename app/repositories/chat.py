@@ -1,4 +1,5 @@
 """数据库访问层：不依赖 HTTP 或模型，所有事务都短于模型生成时间。"""
+
 import hashlib
 import json
 
@@ -41,6 +42,10 @@ class ChatRepository:
     def __init__(self, db, knowledge=None):
         self.db = db
         self.knowledge = knowledge
+        # 请求级上下文，不能放进应用共享服务，否则并发会串用别人的问题和证据。
+        self.raw_question = None
+        self.query_filters = {}
+        self.latest_retrieval = None
 
     async def open_conversation(self, session_id):
         """
@@ -85,8 +90,16 @@ class ChatRepository:
         这里先控制读库条数，service 中还会按上下文预算裁剪完整回合。
         """
         async with self.db.sessions() as session:
-            rows = list((await session.scalars(select(Message).where(
-                Message.conversation_id == cid).order_by(Message.id.desc()).limit(200))).all())
+            rows = list(
+                (
+                    await session.scalars(
+                        select(Message)
+                        .where(Message.conversation_id == cid)
+                        .order_by(Message.id.desc())
+                        .limit(200)
+                    )
+                ).all()
+            )
         # 只回放已经有最终 assistant 的完整回合；断线留下的流水仍可审计。
         complete, turn, pending = [], [], set()
         # turn 是当前临时回合；pending 是发出申请但尚未收到结果的调用 ID 集合。
@@ -111,11 +124,19 @@ class ChatRepository:
         return complete
 
     async def query_faq(self, keyword):
-        """Ch03：dense 召回主键，再从 MySQL 读取原文，保留原返回契约。"""
+        """用本轮原话检索知识，保留query_faq原入参及四字段出参契约。"""
         if self.knowledge is None:
             from app.knowledge.runtime import build_service
+
             self.knowledge = build_service(self.db)
         # 沿用keyword原话参数和四字段返回；向量服务故障交给原工具错误流程，不回退LIKE。
+        if self.raw_question is not None and getattr(self.knowledge, 'retriever', None):
+            # keyword依旧接受原话片段；内部检索用完整问题，避免切掉型号或限定条件。
+            self.latest_retrieval = await self.knowledge.retriever.search(
+                self.raw_question or keyword, self.query_filters
+            )
+            # 排名/证据另存请求上下文，供后续引用生成；工具只返回旧业务四字段。
+            return self.knowledge.search_items(self.latest_retrieval, False)
         return await self.knowledge.search(keyword)
 
     async def record_tool_result(self, cid, call_id, result, after_message_id=0):
@@ -124,14 +145,23 @@ class ChatRepository:
         call_id 来自上游，不能假设它在所有请求中全局唯一。
         """
         async with self.db.sessions.begin() as session:
-            row = await session.scalar(select(Message).where(
-                Message.conversation_id == cid, Message.tool_call_id == call_id,
-                Message.role == 'tool', Message.id > after_message_id
-            ).order_by(Message.id.desc()).limit(1))
+            row = await session.scalar(
+                select(Message)
+                .where(
+                    Message.conversation_id == cid,
+                    Message.tool_call_id == call_id,
+                    Message.role == 'tool',
+                    Message.id > after_message_id,
+                )
+                .order_by(Message.id.desc())
+                .limit(1)
+            )
             if row:
                 # 写工具可能已经与工单一起存好了结果；直接复用，不重复加消息。
                 return decode_message(row)
-            message = ToolMessage(content=json.dumps(result, ensure_ascii=False), tool_call_id=call_id)
+            message = ToolMessage(
+                content=json.dumps(result, ensure_ascii=False), tool_call_id=call_id
+            )
             # 模型协议要求 tool 结果带匹配的 tool_call_id；JSON 转成正文字符串保存。
             session.add(encode_message(cid, message))
             return message
@@ -148,14 +178,27 @@ class ChatRepository:
                 if existing.conversation_id != cid:
                     raise ValueError('Ticket ownership mismatch')
                 return result
-            session.add(Ticket(ticket_no=ticket_no, conversation_id=cid,
-                               description=description, ticket_type=ticket_type))
+            session.add(
+                Ticket(
+                    ticket_no=ticket_no,
+                    conversation_id=cid,
+                    description=description,
+                    ticket_type=ticket_type,
+                )
+            )
             # add 是登记 ORM 对象，不等于提交；后续查询可能触发 autoflush，
             # 但仍属于当前事务，只有整个 with 成功退出才提交。
             conversation = await session.get(Conversation, cid)
             conversation.status = '已转人工'
             # 工单和成功结果原子提交：模型回复失败也能追溯已经创建的工单。
             # 任意写入失败则整个事务回滚，避免只建工单却没有对应成功结果。
-            session.add(encode_message(cid, ToolMessage(
-                content=json.dumps(result, ensure_ascii=False), tool_call_id=call_id)))
+            session.add(
+                encode_message(
+                    cid,
+                    ToolMessage(
+                        content=json.dumps(result, ensure_ascii=False),
+                        tool_call_id=call_id,
+                    ),
+                )
+            )
             return result
