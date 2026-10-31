@@ -17,9 +17,36 @@ from app.schemas.chat import ChatRequest
 from app.schemas.actions import TicketConfirmation
 from app.workflow.service import WorkflowService
 from app.workflow.graph import AGENT_SYSTEM
+from app.workflow.routing_service import RoutingService
+from app.refunds import OrderSelection, RefundSubmission
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def workflow_service(request, repo, model, settings):
+    """正式图使用可恢复选单服务；历史隔离图显式使用旧服务。"""
+    graph = request.app.state.workflow
+    arguments = dict(
+        rag=getattr(request.app.state, 'rag', None),
+        classifier=getattr(request.app.state, 'workflow_classifier', None),
+    )
+    if not getattr(graph, 'formal_router', False):
+        return WorkflowService(graph, repo, model, settings, **arguments)
+    small = None
+    if settings.intent_small_model:
+        # 显式小模型配置仍沿用同一兼容上游与凭据，不更改主聊天模型。
+        small = model.model_copy(update={'model_name': settings.intent_small_model})
+    return RoutingService(
+        graph,
+        repo,
+        model,
+        settings,
+        **arguments,
+        understander=getattr(request.app.state, 'workflow_understander', None),
+        expander=getattr(request.app.state, 'workflow_expander', None),
+        small_model=small,
+    )
 
 
 def get_repository(request: Request):
@@ -88,16 +115,7 @@ async def chat(
                 workflow = getattr(request.app.state, "workflow", None)
                 if workflow is not None:
                     # 共享的是已编译图；每个HTTP请求仍创建独立服务/仓库/工具上下文。
-                    service = WorkflowService(
-                        workflow,
-                        repo,
-                        model,
-                        settings,
-                        rag=getattr(request.app.state, "rag", None),
-                        classifier=getattr(
-                            request.app.state, "workflow_classifier", None
-                        ),
-                    )
+                    service = workflow_service(request, repo, model, settings)
                     event_stream = service.stream(
                         body.session_id,
                         body.message,
@@ -126,6 +144,8 @@ async def chat(
                             "citations",
                             "workflow",
                             "actions",
+                            "order_selection",
+                            "refund_offer",
                         ):
                             # 命名事件分别携带工具状态、来源、执行事实和按钮建议。
                             # type只用于后端分流；发送event名称后去掉内部type键。
@@ -157,6 +177,89 @@ async def chat(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.post('/chat/orders', response_class=StreamingResponse)
+async def select_order(
+    body: OrderSelection,
+    request: Request,
+    settings: Annotated[Settings, Depends(get_settings)],
+    model=Depends(get_chat_model),
+    repo=Depends(get_repository),
+):
+    """点选仅恢复当前暂停图；服务端校验候选集合，非法选择用明确错误结束。"""
+    if not getattr(
+        getattr(request.app.state, 'workflow', None), 'formal_router', False
+    ):
+        raise HTTPException(503, '正式分流尚未启用')
+
+    async def stream():
+        async with request.app.state.sessions.lock(body.session_id):
+            try:
+                service = workflow_service(request, repo, model, settings)
+                async with aclosing(service.resume(body)) as events:
+                    async for item in events:
+                        if item['type'] == 'delta':
+                            yield sse_frame({'delta': item['delta']})
+                        else:
+                            yield sse_frame(
+                                {
+                                    key: value
+                                    for key, value in item.items()
+                                    if key != 'type'
+                                },
+                                item['type'],
+                            )
+                        await asyncio.sleep(0)
+                yield sse_frame('[DONE]')
+            except LookupError:
+                yield sse_frame(
+                    dict(
+                        error='selection_expired',
+                        message='这张订单卡片已失效，请重新发送问题选择订单',
+                    ),
+                    'error',
+                )
+            except Exception as exc:
+                logger.warning('Order resume failure: %s', type(exc).__name__)
+                yield sse_frame(
+                    dict(
+                        error='upstream_error',
+                        message='选单后处理未完成，请用同一订单卡片重试核对',
+                    ),
+                    'error',
+                )
+
+    return StreamingResponse(
+        stream(),
+        media_type='text/event-stream',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
+    )
+
+
+@router.post('/chat/refunds')
+async def submit_refund(
+    body: RefundSubmission,
+    request: Request,
+    settings: Annotated[Settings, Depends(get_settings)],
+    repo=Depends(get_repository),
+):
+    """用户确认保存演示申请；不会执行退款、建工单或转人工。"""
+    graph = getattr(request.app.state, 'workflow', None)
+    if not getattr(graph, 'formal_router', False):
+        raise HTTPException(503, '正式分流尚未启用')
+    async with request.app.state.sessions.lock(body.session_id):
+        try:
+            return await RoutingService(graph, repo, None, settings).confirm_refund(
+                body
+            )
+        except LookupError:
+            raise HTTPException(404, '本会话没有这条退款申请建议') from None
+        except Exception as exc:
+            logger.warning('Refund submission failure: %s', type(exc).__name__)
+            raise HTTPException(
+                503, '暂时无法确认申请结果，请使用同一表单重试核对'
+            ) from None
 
 
 @router.post("/chat/tickets")

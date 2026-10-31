@@ -10,7 +10,7 @@ sys.path.insert(0, str(ROOT))
 
 from app.config import get_settings
 from app.workflow.persistence import open_checkpointer, run_async
-from app.workflow.graph import build_graph
+from app.workflow.routing import build_graph
 from app.workflow.service import WorkflowService
 
 

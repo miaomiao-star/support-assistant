@@ -1,6 +1,8 @@
-"""五个业务工具。mock 数据每次随机生成，不代表真实业务状态。"""
+"""五个业务工具。订单/物流为固定演示，商品价格库存仍随机，不代表真实业务。"""
 
 import random
+
+from app.tools.demo_orders import get_order, get_logistics
 
 from langchain.tools import tool
 
@@ -19,16 +21,12 @@ def build_tools(context):
 
     @tool(args_schema=OrderInput)
     async def query_order(order_id: str) -> dict:
-        """按订单号查询订单状态；返回随机演示数据。"""
-        # 原样返回查询的订单号；状态与金额每次随机，不读取 orders 表或真实 API。
-        # *_cents 使用整数分，避免用浮点数表达金额；mock=True 提醒上层是模拟。
-        return dict(
-            mock=True,
-            order_id=order_id,
-            status=random.choice(['待付款', '已付款', '已发货', '已完成']),
-            total_cents=random.randint(1000, 50000),
-            currency='CNY',
-        )
+        """按订单号查询订单状态和商品条件；返回固定演示数据。"""
+        # Ch06卡片和查询共用固定源；未知编号不凭空生成。金额使用整数分。
+        try:
+            return get_order(order_id)
+        except LookupError:
+            return dict(ok=False, error='order_not_found')
 
     @tool(args_schema=ProductInput)
     async def query_product(keyword: str) -> dict:
@@ -44,16 +42,12 @@ def build_tools(context):
 
     @tool(args_schema=OrderInput)
     async def query_logistics(order_id: str) -> dict:
-        """按订单号直接查询物流，无需先查订单；返回随机演示数据。"""
-        # 直接接受订单号，确保“查物流”只需一个工具，符合本章单轮执行范围。
-        # 三个字段分别随机，未模拟完整物流状态机或真实轨迹一致性。
-        return dict(
-            mock=True,
-            order_id=order_id,
-            carrier=random.choice(['顺丰', '中通', '圆通']),
-            status=random.choice(['已揽收', '运输中', '派送中', '已签收']),
-            location=random.choice(['上海转运中心', '杭州转运中心', '收件地营业部']),
-        )
+        """按订单号直接查询物流，无需先查订单；返回固定演示数据。"""
+        # 物流与卡片的签收状态一致，仍未接真实物流服务。
+        try:
+            return get_logistics(order_id)
+        except LookupError:
+            return dict(ok=False, error='order_not_found')
 
     @tool(args_schema=FAQInput)
     async def query_faq(keyword: str) -> dict:

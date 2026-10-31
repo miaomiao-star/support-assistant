@@ -3,6 +3,7 @@
 from functools import lru_cache
 
 from langchain_openai import ChatOpenAI
+from app.core.compatible import CompatibleChatOpenAI
 
 from app.config import get_settings
 from app.core.prompts import EXTRACT_PROMPT
@@ -13,7 +14,7 @@ from app.schemas.extract import AfterSalesTicket
 def get_chat_model() -> ChatOpenAI:
     """创建并缓存客户端；不是把对话历史放进模型对象。"""
     settings = get_settings()
-    return ChatOpenAI(
+    return CompatibleChatOpenAI(
         model=settings.chat_model,
         base_url=settings.chat_base_url,
         api_key=settings.chat_api_key.get_secret_value(),

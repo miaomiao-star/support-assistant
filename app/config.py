@@ -83,6 +83,11 @@ class Settings(BaseSettings):
     agent_total_token_budget: int = Field(default=24000, gt=0)
     # 覆盖分类、检索及全部Agent/工具步的整轮墙钟超时，不只限制一个工具。
     workflow_timeout_seconds: float = Field(default=180, gt=0, le=600)
+    # 默认沿用已确认聊天模型；小模型名只有显式配置后才启用一次升级路线。
+    intent_confidence_threshold: float = Field(
+        default=0.65, ge=0, le=1, allow_inf_nan=False
+    )
+    intent_small_model: str | None = None
 
 
 @lru_cache

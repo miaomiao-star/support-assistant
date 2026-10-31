@@ -321,6 +321,13 @@
         color: #496343;
         font: 12px system-ui;
       }
+      .order-picker { display:grid; gap:10px; margin:14px 0; }
+      .order-card { text-align:left; white-space:pre-line; border:1px solid #d8e0d3; border-radius:12px; padding:14px; background:#f6f8f1; color:#344832; cursor:pointer; }
+      .order-card:hover { border-color:#718d58; background:#edf3e4; }
+      .order-card:disabled { opacity:.55; cursor:default; }
+      #refundDialog { max-width:420px; width:calc(100% - 48px); border:1px solid #dce4d7; border-radius:18px; padding:24px; }
+      #refundDialog label { display:block; margin:14px 0 6px; }
+      #refundDialog select, #refundDialog textarea { width:100%; box-sizing:border-box; padding:10px; }
     </style></head
   ><body>
     <a
@@ -397,6 +404,19 @@
           <button id="cancelSupport" type="button">取消</button>
           <button id="confirmSupport" type="submit">确认</button>
         </div>
+      </form>
+    </dialog>
+    <dialog id="refundDialog" aria-labelledby="refundTitle">
+      <form id="refundForm">
+        <h2 id="refundTitle">填写退款申请</h2>
+        <p id="refundOrder"></p>
+        <p>演示申请会保存为待处理，不会执行资金退款。</p>
+        <label for="refundReason">退款原因</label>
+        <select id="refundReason" required></select>
+        <label for="refundDescription">补充说明（选填）</label>
+        <textarea id="refundDescription" maxlength="2000" rows="3"></textarea>
+        <p id="refundStatus" role="status"></p>
+        <div class="confirm-buttons"><button id="cancelRefund" type="button">取消</button><button id="submitRefund" type="submit">确认提交申请</button></div>
       </form>
     </dialog>
     <!-- 使用同源 POST /api/chat；密钥只保留在后端，不传到浏览器。 -->
@@ -587,6 +607,72 @@
         }
         reply.parentElement.append(box);
       }
+      function renderOrderSelection(reply, selection, ownerSession) {
+        const box = document.createElement("div");
+        box.className = "order-picker";
+        box.setAttribute("aria-label", "请选择订单");
+        for (const order of selection.orders || []) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "order-card";
+          button.dataset.orderId = order.order_id;
+          button.textContent = "订单 " + order.order_id + " · " + order.product_name + "\n" + order.status + " · ¥" + (order.total_cents / 100).toFixed(2) + " · 签收 " + order.days_since_delivery + " 天\n演示订单 · 点选后继续处理";
+          button.onclick = () => {
+            if (busy || session !== ownerSession) return;
+            submit({ selection_id: selection.selection_id, order_id: order.order_id, ownerSession, box });
+          };
+          box.append(button);
+        }
+        reply.parentElement.append(box);
+        messages.scrollTop = messages.scrollHeight;
+      }
+
+      function renderRefundOffer(reply, offer, ownerSession) {
+        const box = document.createElement("div"), button = document.createElement("button");
+        box.className = "support-options";
+        button.type = "button";
+        button.textContent = "填写退款申请";
+        box.append(button);
+        reply.parentElement.append(box);
+        button.onclick = () => {
+          if (session !== ownerSession) return;
+          const dialog = document.querySelector("#refundDialog"), form = document.querySelector("#refundForm"), reason = document.querySelector("#refundReason"), note = document.querySelector("#refundStatus"), confirm = document.querySelector("#submitRefund");
+          document.querySelector("#refundOrder").textContent = "订单 " + offer.order.order_id + " · " + offer.order.product_name;
+          reason.replaceChildren();
+          const placeholder = document.createElement("option");
+          placeholder.value = "";
+          placeholder.textContent = "请选择退款原因";
+          reason.append(placeholder);
+          for (const text of offer.reasons) {
+            const option = document.createElement("option");
+            option.value = option.textContent = text;
+            reason.append(option);
+          }
+          document.querySelector("#refundDescription").value = "";
+          note.textContent = "";
+          confirm.disabled = false;
+          document.querySelector("#cancelRefund").onclick = () => dialog.close();
+          form.onsubmit = async (event) => {
+            event.preventDefault();
+            if (session !== ownerSession || confirm.disabled) return;
+            confirm.disabled = true;
+            note.textContent = "正在提交…";
+            try {
+              const response = await fetch("/api/chat/refunds", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_id:ownerSession,offer_id:offer.offer_id,reason:reason.value,description:document.querySelector("#refundDescription").value.trim(),confirmed:true})});
+              const result = await response.json();
+              if (!response.ok || !result.ok) throw Error(result.detail || "暂时无法确认结果，请用同一表单重试");
+              button.disabled = true;
+              button.textContent = "退款申请 " + result.application_no + " · 待处理";
+              dialog.close();
+              bubble("演示退款申请已提交，编号 " + result.application_no + "，当前待处理。尚未执行退款。");
+            } catch(error) {
+              note.textContent = error.message;
+              confirm.disabled = false;
+            }
+          };
+          dialog.showModal();
+        };
+      }
       document.querySelector("#closeSource").onclick = () =>
         document.querySelector("#sourceDialog").close();
       // 下拉选项来自服务端标注；只读加载失败不影响用户继续使用“全部品类”。
@@ -603,13 +689,15 @@
 
       // 发送流程：锁定发送按钮 → 显示用户消息 → 读取 SSE → 完成/报错后恢复按钮。
       // busy 避免一页内同时发多轮，防止上下文先后顺序交错。
-      async function submit() {
-        const text = input.value.trim();
+      async function submit(selection = null) {
+        const text = selection ? "我选择订单 " + selection.order_id : input.value.trim();
         if (!text || busy) return;
         busy = true;
         send.disabled = true;
         reset.disabled = true;
         input.value = "";
+        // 新问题结束旧等待；点选期间防止重复点击。失败时只恢复本次卡片。
+        document.querySelectorAll(".order-card").forEach((button) => { button.disabled = true; });
         document.querySelector(".intro")?.remove();
         bubble(text, true);
         const reply = bubble("正在思考…");
@@ -620,7 +708,9 @@
           done = false,
           painted = false,
           evidence = [],
-          actions = null;
+          actions = null,
+          orderSelection = null,
+          refundOffer = null;
         // 网络 chunk 可能有多个字；队列每 18ms 显示一个 Unicode 码点。
         // 这是视觉打字效果，不是 tokenizer 级别的计数；组合 emoji 仍可能分开显示。
         const timer = setInterval(() => {
@@ -656,6 +746,8 @@
           const item = JSON.parse(payload);
           // workflow用于开发日志检查，不将内部节点名展示成客服对话正文。
           if (event === "workflow") return;
+          if (event === "order_selection") { orderSelection = item; return; }
+          if (event === "refund_offer") { refundOffer = item; return; }
           if (event === "actions") {
             // 先暂存建议，等本轮DONE且正文绘制完成才渲染，失败轮不会留下可点按钮。
             actions = item;
@@ -704,10 +796,10 @@
         // TextDecoder 的 stream 模式处理中文 UTF-8 字节被拆到不同网络片段的情况。
         // 收到 DONE 后等逐字队列显示完，再允许下一轮发送。
         try {
-          const response = await fetch("/api/chat", {
+          const response = await fetch(selection ? "/api/chat/orders" : "/api/chat", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
+            body: JSON.stringify(selection ? {session_id: selection.ownerSession, selection_id: selection.selection_id, order_id: selection.order_id} : {
               session_id: session,
               message: text,
               filters: {
@@ -745,7 +837,9 @@
           if (!done) throw Error("连接中断，回复未完成，请重试");
           while (pending) await new Promise((r) => setTimeout(r, 25));
           renderCitations(reply, output, evidence);
-          feedback(reply);
+          if (!orderSelection) feedback(reply);
+          if (orderSelection) renderOrderSelection(reply, orderSelection, replySession);
+          if (refundOffer) renderRefundOffer(reply, refundOffer, replySession);
           // 普通聊天不等待用户选择；这只是当前回答附带的一组可选操作。
           if (actions) renderSupportOptions(reply, actions, replySession);
           status.textContent = "回复完成 · 可以继续追问";
@@ -759,6 +853,7 @@
           note.textContent = error.message;
           reply.parentElement.append(note);
           status.textContent = "本轮未完成，可重新发送";
+          if (selection && session === selection.ownerSession) selection.box.querySelectorAll("button").forEach((button) => { button.disabled = button.dataset.orderId !== selection.order_id; });
         } finally {
           // 成功或失败都释放 reader 和定时器，避免按钮一直锁定。
           clearInterval(timer);

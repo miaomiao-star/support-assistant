@@ -27,6 +27,8 @@ def estimate_tokens(messages: list[BaseMessage], chars_per_token: float = 1.2) -
     total = 0
     for message in messages:
         content = str(message.content)
+        # 兼容上游需要回传的协议字段也占输入，不能因为页面不显示就漏算。
+        content += message.additional_kwargs.get('reasoning_content', '') or ''
         if getattr(message, 'tool_calls', None):
             # 文本正文可能为空，但申请里的工具名、参数 JSON 仍然占用上下文。
             content += json.dumps(message.tool_calls, ensure_ascii=False)

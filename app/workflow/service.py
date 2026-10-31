@@ -89,7 +89,8 @@ class WorkflowService:
         config = self.config(body.session_id)
         # 重新从服务端checkpoint查建议，不信任前端自己拼的动作或会话归属。
         # API层和普通聊天使用同一把会话锁，避免本进程内边聊天边确认覆盖状态。
-        state = (await self.graph.aget_state(config)).values
+        snapshot = await self.graph.aget_state(config)
+        state = snapshot.values
         offers = dict(state.get("offers", {}))
         offer = offers.get(body.offer_id)
         if not offer or "create_ticket" not in offer["actions"]:
@@ -129,6 +130,10 @@ class WorkflowService:
             raise RuntimeError("Ticket creation unconfirmed")
         receipt = AIMessage(content=f'已创建待处理工单 {result["ticket_no"]}。')
         await self.repo.add_messages(cid, [receipt])
+        if snapshot.next:
+            # Ch06可在新轮等待选单时确认旧工单建议；业务与完整审计已写MySQL。
+            # 此处不推进或覆盖新轮的图暂停节点，同offer重试仍由稳定工单号兜住。
+            return result
         offers[body.offer_id] = {**offer, "result": result}
         # 不因写入工单切换对话模式，也不自动触发下一次 Agent。
         # MySQL已提交后才写Postgres，这不是跨库事务；回写失败时同offer重试仍同号。

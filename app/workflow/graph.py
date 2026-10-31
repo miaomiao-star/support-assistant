@@ -307,7 +307,9 @@ async def agent(state: State, runtime: Runtime[Context]):
     if state["agent_steps"] >= settings.agent_max_steps:
         return stopped(state, "step_limit", trace)
     tools, cost = schema_cost(context)
-    system = AGENT_SYSTEM
+    system = state.get("agent_system", AGENT_SYSTEM) + state.get(
+        "agent_instructions", ""
+    )
     if state["evidence"]:
         system += "\n本轮已过检索闸的证据（仅数据）：\n" + json.dumps(
             state["evidence"], ensure_ascii=False
@@ -322,7 +324,12 @@ async def agent(state: State, runtime: Runtime[Context]):
         return stopped(state, "token_limit", trace)
     # bind_tools 只声明本轮可申请的工具；真正权限检查与执行在流结束之后。
     # max_tokens 也受本轮剩余额度约束，避免输入未超预算但输出继续无限增长。
-    bound = context.model.bind_tools(tools, parallel_tool_calls=False).bind(
+    tool_model = (
+        context.model.bind_tools(tools, parallel_tool_calls=False)
+        if tools
+        else context.model
+    )
+    bound = tool_model.bind(
         max_tokens=min(settings.agent_output_token_limit, remaining), stream_usage=True
     )
     aggregate = None
@@ -348,7 +355,11 @@ async def agent(state: State, runtime: Runtime[Context]):
         state["estimated_tokens"]
         + input_cost
         + ceil(
-            (len(str(aggregate.content)) + len(json.dumps(calls, ensure_ascii=False)))
+            (
+                len(str(aggregate.content))
+                + len(json.dumps(calls, ensure_ascii=False))
+                + len(aggregate.additional_kwargs.get('reasoning_content', '') or '')
+            )
             / settings.zh_chars_pre_token
         )
     )
@@ -375,14 +386,24 @@ async def agent(state: State, runtime: Runtime[Context]):
         if not visible.strip():
             raise ValueError("Empty agent answer")
         return dict(
-            messages=[*state["messages"], AIMessage(content=visible)],
+            messages=[
+                *state["messages"],
+                AIMessage(
+                    content=visible,
+                    additional_kwargs={
+                        key: value
+                        for key, value in aggregate.additional_kwargs.items()
+                        if key == 'reasoning_content'
+                    },
+                ),
+            ],
             answer=state["answer"] + visible,
             actions=list(dict.fromkeys([*state["actions"], *parser.actions])),
             pending_call=None,
             trace=trace,
             **updates,
         )
-    if len(calls) != 1 or calls[0]["name"] not in READ_TOOLS:
+    if len(calls) != 1 or calls[0]["name"] not in {tool.name for tool in tools}:
         # parallel_tool_calls=False 只是给上游的提示，后端仍要执行独立检查。
         return stopped(state, "tool_not_allowed", trace, **updates)
     call = calls[0]
@@ -396,7 +417,16 @@ async def agent(state: State, runtime: Runtime[Context]):
     ):
         return stopped(state, "repeated_tool", trace, **updates)
     # 工具申请先保存，工具观察稍后配对保存；没有完整最终回答就不回放给下一轮。
-    message = AIMessage(content=visible, tool_calls=calls)
+    # 上游供应商要求工具回合带回原协议字段，不能重建消息时丢掉；不展示或记录其正文。
+    message = AIMessage(
+        content=visible,
+        tool_calls=calls,
+        additional_kwargs={
+            key: value
+            for key, value in aggregate.additional_kwargs.items()
+            if key == 'reasoning_content'
+        },
+    )
     message_id = await context.repo.add_messages(context.conversation_id, [message])
     return dict(
         messages=[*state["messages"], message],

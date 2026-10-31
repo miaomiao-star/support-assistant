@@ -12,12 +12,16 @@ from app.api.kb import router as kb_router
 from app.knowledge.runtime import build_service, ROOT
 from app.knowledge.jobs import Jobs
 from fastapi.responses import FileResponse
-from app.workflow.graph import build_graph
+from app.workflow.routing import build_graph
 from app.workflow.persistence import open_checkpointer
 
 
 def create_app(
-    database: Database | None = None, *, checkpointer=None, workflow_enabled=True
+    database: Database | None = None,
+    *,
+    checkpointer=None,
+    workflow_enabled=True,
+    graph_factory=None,
 ) -> FastAPI:
     """组装Web应用、共享图和资源生命周期；测试可显式注入隔离依赖。
 
@@ -60,7 +64,7 @@ def create_app(
                         )
                     # 编译图只做节点/边/状态与saver的组装；这里不发起LLM对话。
                     # 图由整个应用共享，真正的请求依赖通过Runtime Context逐轮传入。
-                    application.state.workflow = build_graph(saver)
+                    application.state.workflow = (graph_factory or build_graph)(saver)
                 yield
         finally:
             # 先收敛后台任务，再关闭其依赖的向量连接和数据库，避免使用已关闭资源。

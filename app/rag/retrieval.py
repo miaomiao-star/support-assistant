@@ -164,6 +164,50 @@ class Retriever:
         self.understanding, self.reranker = understanding, reranker
         self.min_score = min_score
 
+    async def search_queries(
+        self, primary, queries, filters=None, *, policy=False, after_sales=False
+    ):
+        """Ch06已理解的Query直接召回；先按主键合并，再对统一候选重排一次。"""
+        filters = dict(filters or {})
+        if policy:
+            # 核心售后不能用页面商品过滤排除通用政策。强制范围由服务端负责。
+            filters = {}
+        expression = build_filter(filters)
+        if policy:
+            expression = 'content_type == "policy"'
+            if after_sales:
+                expression = '(content_type == "policy" or content_type == "manual")'
+        rows = {str(row['id']): row for row in await self.store.all_chunks()}
+        candidates = {}
+        for query in list(dict.fromkeys(queries))[:4]:
+            vector = await self.embeddings.aembed_query(query)
+            hits = await self.vectors.retrieve(
+                query, vector, 'hybrid_rerank', expression
+            )
+            for hit in hits:
+                key = str(hit['id'])
+                row = rows.get(key)
+                if row is None or row['vectorize_status'] != 'done':
+                    continue
+                if policy and row.get('content_type') != 'policy':
+                    # 只补充售后手册，不能把同为manual的商品规格当政策。
+                    path = row.get('section_path') or ''
+                    if (
+                        not after_sales
+                        or row.get('content_type') != 'manual'
+                        or '售后手册' not in path
+                    ):
+                        continue
+                candidates.setdefault(key, {**row, 'score': hit['score']})
+        ranked = await self.reranker.rank(primary, list(candidates.values()), 10)
+        return dict(
+            raw_question=primary,
+            queries=queries,
+            candidates=list(candidates.values()),
+            ranked=ranked,
+            low_confidence=not ranked or ranked[0]['rerank_score'] < self.min_score,
+        )
+
     async def search(self, raw, filters=None, strategy='hybrid_rerank'):
         """Milvus先过滤/召回，MySQL回查后重排；返回诊断与最终相关性顺序。"""
         if strategy not in STRATEGIES:
