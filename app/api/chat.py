@@ -14,6 +14,9 @@ from app.core.prompts import CUSTOMER_SERVICE_SYSTEM
 from app.repositories.chat import ChatRepository
 from app.services.chat import ChatService
 from app.schemas.chat import ChatRequest
+from app.schemas.actions import TicketConfirmation
+from app.workflow.service import WorkflowService
+from app.workflow.graph import AGENT_SYSTEM
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -55,14 +58,20 @@ async def chat(
     - model: 聊天模型，通过依赖注入获取。
     """
     # FastAPI 校验 body；Depends 取得配置/模型。Request 则提供应用共享状态。
-    # Ch02 这里的 store 只用来取进程内锁，聊天历史实际由 repository 读 MySQL。
+    # store只提供进程内锁；Ch05完整历史由checkpoint延续，首次才从MySQL引入。
     store = request.app.state.sessions
     try:
         # 在发送响应头之前检查当前输入。开始流以后无法改 HTTP 状态为 422。
+        # 预检必须使用实际路径的system，避免旧Prompt能放下、新Agent Prompt却超预算。
+        system = (
+            AGENT_SYSTEM
+            if getattr(request.app.state, "workflow", None) is not None
+            else CUSTOMER_SERVICE_SYSTEM
+        )
         prepare_messages(
             [],
             body.message,
-            CUSTOMER_SERVICE_SYSTEM,
+            system,
             settings.llm_token_budget,
             settings.zh_chars_pre_token,
         )
@@ -76,32 +85,56 @@ async def chat(
         async with store.lock(body.session_id):
             # 锁覆盖整个生成过程，避免同一会话的并发问答顺序交错。
             try:
-                service = ChatService(
-                    repo,
-                    model,
-                    text_budget=settings.llm_token_budget,
-                    tool_budget=settings.tool_context_budget,
-                    chars_per_token=settings.zh_chars_pre_token,
-                    tool_timeout=settings.tool_timeout_seconds,
-                    rag=getattr(request.app.state, 'rag', None),
-                    filters=body.filters.model_dump(exclude_none=True),
-                )
+                workflow = getattr(request.app.state, "workflow", None)
+                if workflow is not None:
+                    # 共享的是已编译图；每个HTTP请求仍创建独立服务/仓库/工具上下文。
+                    service = WorkflowService(
+                        workflow,
+                        repo,
+                        model,
+                        settings,
+                        rag=getattr(request.app.state, "rag", None),
+                        classifier=getattr(
+                            request.app.state, "workflow_classifier", None
+                        ),
+                    )
+                    event_stream = service.stream(
+                        body.session_id,
+                        body.message,
+                        body.filters.model_dump(exclude_none=True),
+                    )
+                else:
+                    # 仅兼容显式关闭Workflow的旧章节回归，不是Postgres故障时自动降级。
+                    service = ChatService(
+                        repo,
+                        model,
+                        text_budget=settings.llm_token_budget,
+                        tool_budget=settings.tool_context_budget,
+                        chars_per_token=settings.zh_chars_pre_token,
+                        tool_timeout=settings.tool_timeout_seconds,
+                        rag=getattr(request.app.state, "rag", None),
+                        filters=body.filters.model_dump(exclude_none=True),
+                    )
+                    event_stream = service.stream(body.session_id, body.message)
                 # aclosing 保证页面断开时关闭内层生成器及其上游模型流。
-                async with aclosing(
-                    service.stream(body.session_id, body.message)
-                ) as events:
+                async with aclosing(event_stream) as events:
                     async for event in events:
                         # service 产生内部 dict 事件；HTTP/SSE 格式在 API 层转换。
                         # tool 走命名事件，delta 延用原文本事件，前端分别处理。
-                        if event['type'] in ('tool', 'citations'):
-                            # 引用使用独立事件，不掺进delta正文；旧客户端仍能按类型忽略它。
-                            # type 只供后端分流使用，剩下 name/call_id/status/error 给页面。
+                        if event["type"] in (
+                            "tool",
+                            "citations",
+                            "workflow",
+                            "actions",
+                        ):
+                            # 命名事件分别携带工具状态、来源、执行事实和按钮建议。
+                            # type只用于后端分流；发送event名称后去掉内部type键。
                             yield sse_frame(
-                                {k: v for k, v in event.items() if k != 'type'},
-                                event['type'],
+                                {k: v for k, v in event.items() if k != "type"},
+                                event["type"],
                             )
                         else:
-                            yield sse_frame({'delta': event['delta']})
+                            yield sse_frame({"delta": event["delta"]})
                         await asyncio.sleep(0)
                 # 服务生成器正常结束表示最终回复已落库，才允许发送成功标记。
                 yield sse_frame("[DONE]")
@@ -124,3 +157,32 @@ async def chat(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.post("/chat/tickets")
+async def confirm_ticket(
+    body: TicketConfirmation,
+    request: Request,
+    settings: Annotated[Settings, Depends(get_settings)],
+    repo=Depends(get_repository),
+):
+    """校验独立建单确认并调用服务；没有转人工动作，也不会请求模型。
+
+    与聊天共用会话锁，避免本进程内两个请求同时覆盖同一份checkpoint建议表。
+    无建议返回404；提交结果不确定返回503，引导同建议重试而不是新开一单。
+    """
+    workflow = getattr(request.app.state, "workflow", None)
+    if workflow is None:
+        raise HTTPException(503, "Workflow 尚未启用")
+    async with request.app.state.sessions.lock(body.session_id):
+        # 此路径不调用模型，显式传None，写入依据是已确认的请求和服务器保存的建议。
+        service = WorkflowService(workflow, repo, None, settings)
+        try:
+            return await service.confirm_ticket(body)
+        except LookupError:
+            raise HTTPException(404, "本会话没有这条可用的建工单建议") from None
+        except Exception as exc:
+            logger.warning("Ticket confirmation failure: %s", type(exc).__name__)
+            raise HTTPException(
+                503, "暂时无法确认建单结果，请使用同一个按钮重试核对"
+            ) from None

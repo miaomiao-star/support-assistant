@@ -1,4 +1,4 @@
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -12,10 +12,18 @@ from app.api.kb import router as kb_router
 from app.knowledge.runtime import build_service, ROOT
 from app.knowledge.jobs import Jobs
 from fastapi.responses import FileResponse
+from app.workflow.graph import build_graph
+from app.workflow.persistence import open_checkpointer
 
 
-def create_app(database: Database | None = None) -> FastAPI:
-    """组装应用；工厂形式让测试能创建彼此独立的应用和会话存储。"""
+def create_app(
+    database: Database | None = None, *, checkpointer=None, workflow_enabled=True
+) -> FastAPI:
+    """组装Web应用、共享图和资源生命周期；测试可显式注入隔离依赖。
+
+    正常入口保持workflow_enabled=True并打开官方Postgres saver。
+    checkpointer注入和关闭Workflow供测试使用，不能通过聊天请求切换。
+    """
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
@@ -37,12 +45,23 @@ def create_app(database: Database | None = None) -> FastAPI:
             else None
         )
         application.state.kb_jobs = Jobs(
-            ROOT / 'work' / 'ch03' / ('test' if database else 'web')
+            ROOT / "work" / "ch03" / ("test" if database else "web")
         )
         try:
             # 只检查连通性，不在应用启动时重建业务表。
             await application.state.database.check()
-            yield
+            # ExitStack托管动态创建的异步资源：初始化图失败或Web退出都会关闭连接池。
+            async with AsyncExitStack() as resources:
+                if workflow_enabled:
+                    saver = checkpointer
+                    if saver is None:
+                        saver = await resources.enter_async_context(
+                            open_checkpointer(get_settings())
+                        )
+                    # 编译图只做节点/边/状态与saver的组装；这里不发起LLM对话。
+                    # 图由整个应用共享，真正的请求依赖通过Runtime Context逐轮传入。
+                    application.state.workflow = build_graph(saver)
+                yield
         finally:
             # 先收敛后台任务，再关闭其依赖的向量连接和数据库，避免使用已关闭资源。
             await application.state.kb_jobs.close()
@@ -53,23 +72,25 @@ def create_app(database: Database | None = None) -> FastAPI:
     # lifespan是FastAPI的生命周期管理器，允许在应用启动和关闭时执行特定的代码。
     application = FastAPI(title="MewHelp", version="0.1.0", lifespan=lifespan)
     application.state.sessions = SessionStore()
+    # 生产默认只走 LangGraph；显式关闭仅供旧章节适配器回归使用。
+    application.state.workflow = None
     # SessionStore 保留第一章接口便于回归；新聊天流程只使用它的 lock()。
-    # 数据库历史恢复发生在 ChatRepository.history()，不再调用这里的 commit()。
+    # Ch05历史优先读checkpoint，首次引入旧历史才调用ChatRepository.history()。
     # app.state 是应用级共享对象，不是每个请求各建一份。
-    # 这里只使用单进程会话锁；真实聊天历史由数据库仓库读取。
+    # 这里只使用单进程会话锁；checkpointer持久化不等于已实现多副本同会话互斥。
     application.include_router(chat_router, prefix="/api", tags=["chat"])
     application.include_router(extract_router, prefix="/api", tags=["extract"])
-    application.include_router(kb_router, prefix='/api')
+    application.include_router(kb_router, prefix="/api")
 
-    @application.get('/kb', include_in_schema=False)
+    @application.get("/kb", include_in_schema=False)
     async def knowledge_page():
         """明确页面路由先于首页静态回退，避免 /kb 被首页吞掉。"""
-        return FileResponse(Path(__file__).resolve().parent / 'static' / 'kb.html')
+        return FileResponse(Path(__file__).resolve().parent / "static" / "kb.html")
 
-    @application.get('/kb/source/{key}', include_in_schema=False)
+    @application.get("/kb/source/{key}", include_in_schema=False)
     async def source_page(key: int):
         # 页面模板不接收文件路径，浏览器再按数字主键向原文API读取内容。
-        return FileResponse(Path(__file__).resolve().parent / 'static' / 'source.html')
+        return FileResponse(Path(__file__).resolve().parent / "static" / "source.html")
 
     application.frontend("/", directory=Path(__file__).resolve().parent / "static")
     # 静态页与 API 同源，前端可用 /api/chat，无需跨域配置。

@@ -248,6 +248,44 @@
       .feedback button:disabled {
         opacity: 0.65;
       }
+      /* 两个操作各自成按钮；窄视口可以换行，不把它们合成一个“人工工单”操作。 */
+      .support-options {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+        margin-top: 14px;
+      }
+      .support-options button {
+        border: 1px solid #86a58a;
+        background: #edf4e9;
+        padding: 8px 14px;
+      }
+      #supportDialog {
+        max-width: 480px;
+      }
+      #supportDialog label {
+        display: block;
+        margin: 16px 0 6px;
+      }
+      #ticketDescription, #ticketType {
+        box-sizing: border-box;
+        width: 100%;
+        padding: 10px;
+        border: 1px solid #cddccb;
+        border-radius: 8px;
+        font: inherit;
+      }
+      #ticketDescription {
+        min-height: 110px;
+        resize: vertical;
+      }
+      .confirm-buttons {
+        display: flex;
+        justify-content: flex-end;
+        gap: 10px;
+        margin-top: 22px;
+      }
       dialog {
         max-width: 760px;
         width: 90%;
@@ -342,6 +380,25 @@
         >打开原文页面 ↗</a
       ></dialog
     >
+    <!-- 复用一个确认框显示当前选项；只有建单才启用问题描述和工单类型字段。 -->
+    <dialog id="supportDialog" aria-labelledby="supportTitle">
+      <form id="supportForm">
+        <h2 id="supportTitle">确认操作</h2>
+        <p id="supportNote"></p>
+        <div id="ticketFields">
+          <label for="ticketDescription">问题描述</label>
+          <textarea id="ticketDescription" maxlength="2000"></textarea>
+          <label for="ticketType">工单类型</label>
+          <select id="ticketType">
+            <option>投诉</option><option>售后</option><option>咨询</option>
+          </select>
+        </div>
+        <div class="confirm-buttons">
+          <button id="cancelSupport" type="button">取消</button>
+          <button id="confirmSupport" type="submit">确认</button>
+        </div>
+      </form>
+    </dialog>
     <!-- 使用同源 POST /api/chat；密钥只保留在后端，不传到浏览器。 -->
     <script>
       // 缓存 DOM 元素，减少后续重复查找。
@@ -439,6 +496,97 @@
         box.append(note);
         reply.parentElement.append(box);
       }
+      // 两个选项各自确认：转人工只模拟界面，建工单才发写入请求。
+      async function supportConfirmation(action, offer) {
+        // Promise只表达“这次用户确认/取消”的界面结果，此函数本身不请求后端。
+        const dialog = document.querySelector("#supportDialog");
+        // 已有确认框时不覆盖它的处理器，避免一次确认意外关联两个操作。
+        if (dialog.open) return null;
+        const ticket = action === "create_ticket";
+        const description = document.querySelector("#ticketDescription");
+        const type = document.querySelector("#ticketType");
+        document.querySelector("#supportTitle").textContent = ticket ? "确认创建工单" : "确认转人工";
+        document.querySelector("#supportNote").textContent = ticket
+          ? "确认后将保存一张待处理工单。此操作不会转接人工，也不代表问题已解决。"
+          : "本次将展示人工客服接入效果，不会创建工单。";
+        document.querySelector("#ticketFields").hidden = !ticket;
+        // 隐藏之外还要disabled，转人工时不应被建单字段的required校验卡住。
+        description.disabled = type.disabled = !ticket;
+        description.required = ticket;
+        description.value = offer.description || "";
+        type.value = offer.ticket_type || "咨询";
+        dialog.showModal();
+        return new Promise((resolve) => {
+          document.querySelector("#supportForm").onsubmit = (event) => {
+            event.preventDefault();
+            if (ticket && !description.value.trim()) {
+              description.focus();
+              return;
+            }
+            dialog.close();
+            // 只返回用户确认的业务字段；是否发送API由调用它的按钮分支决定。
+            resolve({ description: description.value.trim(), ticket_type: type.value });
+          };
+          document.querySelector("#cancelSupport").onclick = () => {
+            dialog.close();
+            resolve(null);
+          };
+          // Escape与“取消”按钮同样返回null，不触发工单或转人工。
+          dialog.oncancel = () => resolve(null);
+        });
+      }
+
+      function renderSupportOptions(reply, offer, ownerSession) {
+        // 每条回答捕获自己的会话ID和offer；不能在新对话中误用旧建议。
+        const box = document.createElement("div");
+        box.className = "support-options";
+        box.setAttribute("aria-label", "可选处理方式");
+        for (const option of offer.options || []) {
+          // 动作只认固定白名单；显示文字也由前端映射，不执行服务端给来的任意代码。
+          if (!["handoff", "create_ticket"].includes(option.action)) continue;
+          const button = document.createElement("button");
+          button.type = "button";
+          button.textContent = option.action === "handoff" ? "转人工" : "建工单";
+          button.onclick = async () => {
+            const confirmed = await supportConfirmation(option.action, offer);
+            // 用户取消或已经切换会话时都结束，不把旧确认提交给新会话。
+            if (!confirmed || session !== ownerSession) return;
+            // 只禁用本按钮，另一条路径始终保持独立。
+            button.disabled = true;
+            if (option.action === "handoff") {
+              // 本章只模拟人工接入：没有fetch，也没有任何tickets写入。
+              button.textContent = "已转接人工客服";
+              bubble("已转接人工客服");
+              bubble("您好,我是客服小猫,请问有什么可以帮您的");
+              return;
+            }
+            const note = document.createElement("span");
+            note.setAttribute("role", "status");
+            note.textContent = "正在创建工单…";
+            box.append(note);
+            try {
+              // 只有建单走此分支。offer_id是服务端保存的建议ID，重试仍提交同一个ID。
+              const response = await fetch("/api/chat/tickets", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ session_id: ownerSession, offer_id: offer.offer_id, confirmed: true, ...confirmed }),
+              });
+              const result = await response.json();
+              // HTTP成功与业务ok都满足才显示“已建工单”，不根据按钮点击直接宣告成功。
+              if (!response.ok || !result.ok) throw Error(result.detail || "暂时无法确认建单结果，请重试核对");
+              note.textContent = "工单 " + result.ticket_no + " · 待处理";
+              button.textContent = "已建工单";
+            } catch (error) {
+              // 结果不确定时恢复本按钮，允许同建议重试；不生成新的offer绕过幂等。
+              note.textContent = error.message;
+              note.className = "error";
+              button.disabled = false;
+            }
+          };
+          box.append(button);
+        }
+        reply.parentElement.append(box);
+      }
       document.querySelector("#closeSource").onclick = () =>
         document.querySelector("#sourceDialog").close();
       // 下拉选项来自服务端标注；只读加载失败不影响用户继续使用“全部品类”。
@@ -465,12 +613,14 @@
         document.querySelector(".intro")?.remove();
         bubble(text, true);
         const reply = bubble("正在思考…");
+        const replySession = session;
         let output = "",
           buffer = "",
           pending = "",
           done = false,
           painted = false,
-          evidence = [];
+          evidence = [],
+          actions = null;
         // 网络 chunk 可能有多个字；队列每 18ms 显示一个 Unicode 码点。
         // 这是视觉打字效果，不是 tokenizer 级别的计数；组合 emoji 仍可能分开显示。
         const timer = setInterval(() => {
@@ -504,6 +654,13 @@
             return;
           }
           const item = JSON.parse(payload);
+          // workflow用于开发日志检查，不将内部节点名展示成客服对话正文。
+          if (event === "workflow") return;
+          if (event === "actions") {
+            // 先暂存建议，等本轮DONE且正文绘制完成才渲染，失败轮不会留下可点按钮。
+            actions = item;
+            return;
+          }
           if (event === "citations") {
             evidence = item.citations || [];
             return;
@@ -589,6 +746,8 @@
           while (pending) await new Promise((r) => setTimeout(r, 25));
           renderCitations(reply, output, evidence);
           feedback(reply);
+          // 普通聊天不等待用户选择；这只是当前回答附带的一组可选操作。
+          if (actions) renderSupportOptions(reply, actions, replySession);
           status.textContent = "回复完成 · 可以继续追问";
         } catch (error) {
           // 保留部分文本并显示错误；工具操作流水已保存，半截最终回复不入库。

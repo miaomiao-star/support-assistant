@@ -15,7 +15,12 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(
         # .env.rag仅保存迁移后的非敏感开关/地址，不覆盖原模型凭据。
-        env_file=(PROJECT_ROOT / ".env", PROJECT_ROOT / ".env.rag"),
+        # .env.graph只增加独立Postgres的私有配置；不通过源码写入密码或DSN。
+        env_file=(
+            PROJECT_ROOT / ".env",
+            PROJECT_ROOT / ".env.rag",
+            PROJECT_ROOT / ".env.graph",
+        ),
         env_file_encoding="utf-8",
         extra="ignore",  # .env 中未声明的字段不导致加载失败。
     )
@@ -39,20 +44,20 @@ class Settings(BaseSettings):
     )
     rerank_model: str | None = Field(default=None, validation_alias="RERANK_MODEL")
     # Lite独立服务的连接地址；缺省地址在knowledge/runtime.py中选用本机19530端口。
-    milvus_uri: str | None = Field(default=None, validation_alias='MILVUS_URI')
+    milvus_uri: str | None = Field(default=None, validation_alias="MILVUS_URI")
     # dense 分数下限须结合标注集校准；不引入关键词召回或重排。
     kb_score_threshold: float = Field(default=0.5, ge=-1, le=1)
     # 默认不切索引，只有完整迁移/核验后才通过非敏感的.env.rag启用。
-    rag_enabled: bool = Field(default=False, validation_alias='RAG_ENABLED')
+    rag_enabled: bool = Field(default=False, validation_alias="RAG_ENABLED")
     rag_milvus_uri: str = Field(
-        default='http://127.0.0.1:19531', validation_alias='RAG_MILVUS_URI'
+        default="http://127.0.0.1:19531", validation_alias="RAG_MILVUS_URI"
     )
     rag_collection: str = Field(
-        default='knowledge_ch04', validation_alias='RAG_COLLECTION'
+        default="knowledge_ch04", validation_alias="RAG_COLLECTION"
     )
     # 开发样例校准后的门槛；重排分数不是概率，最终仍须生成自评和引用校验。
     rag_min_score: float = Field(
-        default=0.03, ge=0, le=1, validation_alias='RAG_MIN_SCORE'
+        default=0.03, ge=0, le=1, validation_alias="RAG_MIN_SCORE"
     )
     llm_token_budget: int = Field(
         default=2000, validation_alias="LLM_TOKEN_BUDGET", gt=0
@@ -68,6 +73,16 @@ class Settings(BaseSettings):
     tool_context_budget: int = Field(default=8000, gt=0)
     # 这是单次工具执行超时；只读是否重试由 ToolRegistry 决定。
     tool_timeout_seconds: float = Field(default=5, gt=0, le=60)
+    # 图状态使用独立 Postgres；DSN 作为 SecretStr，不能在日志中打印。
+    graph_postgres_dsn: SecretStr | None = None
+    # max_steps按LLM决策次数计，不是图节点数，也不是工具调用次数。
+    agent_max_steps: int = Field(default=6, ge=1, le=20)
+    # 每次模型输出的硬上限，区别于前面控制输入上下文的tool_context_budget。
+    agent_output_token_limit: int = Field(default=600, ge=1, le=4000)
+    # 累加Agent多次输入/输出的估算消耗；重复发出的历史同样计入。
+    agent_total_token_budget: int = Field(default=24000, gt=0)
+    # 覆盖分类、检索及全部Agent/工具步的整轮墙钟超时，不只限制一个工具。
+    workflow_timeout_seconds: float = Field(default=180, gt=0, le=600)
 
 
 @lru_cache

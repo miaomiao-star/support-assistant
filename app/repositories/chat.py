@@ -188,8 +188,8 @@ class ChatRepository:
             )
             # add 是登记 ORM 对象，不等于提交；后续查询可能触发 autoflush，
             # 但仍属于当前事务，只有整个 with 成功退出才提交。
-            conversation = await session.get(Conversation, cid)
-            conversation.status = '已转人工'
+            # 建工单只保存待处理事项，不代表已接通人工；两种选择互不绑定。
+            # Ch05转人工是前端模拟，因此这里不更新Conversation.status。
             # 工单和成功结果原子提交：模型回复失败也能追溯已经创建的工单。
             # 任意写入失败则整个事务回滚，避免只建工单却没有对应成功结果。
             session.add(
