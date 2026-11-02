@@ -328,20 +328,20 @@
       #refundDialog { max-width:420px; width:calc(100% - 48px); border:1px solid #dce4d7; border-radius:18px; padding:24px; }
       #refundDialog label { display:block; margin:14px 0 6px; }
       #refundDialog select, #refundDialog textarea { width:100%; box-sizing:border-box; padding:10px; }
+      body { display:flex; justify-content:center; }
+      main { width:min(900px,calc(100% - 250px)); margin:0; }
+      #sidebar { width:250px; height:100dvh; padding:28px 14px; background:#eeeee6; overflow:auto; }
+      #sidebar h2 { margin:0 10px 4px; font-size:16px; }
+      #sidebar p { margin:0 10px 20px; color:#758070; font-size:12px; }
+      #conversationList { display:grid; gap:8px; }
+      .conversation-button { text-align:left; width:100%; background:transparent; border:1px solid transparent; color:#45543e; white-space:normal; overflow-wrap:anywhere; }
+      .conversation-button[aria-current="true"] { background:#fffdf9; border-color:#d8e0d3; }
+      .summary-badge { display:block; font-size:11px; color:#6a7e60; margin-top:4px; }
+      .knowledge-link { display:block; margin:0 10px 18px; color:#48786b; font-size:12px; text-decoration:none; }
+      @media(max-width:700px) { #sidebar{width:140px;padding:20px 6px;} main{width:calc(100% - 140px);} header{padding:18px 12px;gap:8px;} header p{display:none;} #messages{padding:16px 12px;} #reset{padding:8px;font-size:12px;} .avatar{display:none;} footer{padding:12px;} }
     </style></head
   ><body>
-    <a
-      href="/kb"
-      style="
-        position: fixed;
-        top: 16px;
-        right: 20px;
-        z-index: 10;
-        color: #48786b;
-        font-size: 14px;
-      "
-      >知识库管理 →</a
-    ><main
+    <aside id="sidebar" aria-label="会话侧栏"><h2>我的对话</h2><p>旧对话随时可以继续</p><a class="knowledge-link" href="/kb">知识库管理 →</a><div id="conversationList"></div></aside><main
       ><header
         ><div class="avatar">🐱</div
         ><div><h1>小喵客服</h1><p>喵喵精选 · 购物与售后咨询</p></div
@@ -428,9 +428,63 @@
         reset = document.querySelector("#reset"),
         status = document.querySelector("#status");
       // 同一页面会话重复发送同一个 session_id，历史由服务端保存。
-      // 刷新或点新对话会生成新 ID；这是会话标识，不是鉴权令牌。
+      // 首次先准备新ID，刷新后若有上次选中会话则回载其规范ID；它不是鉴权令牌。
       let session = crypto.randomUUID(),
         busy = false;
+      // 浏览器匿名访客只用于分组；每个会话的上下文仍完全独立。
+      let visitor = crypto.randomUUID(), activeConversation = null, sidebarVersion = 0, lastConversation = null;
+      // 在任何请求之前同步确定访客；存储不可用时本页仍可聊天，只是不保证刷新后同一分组。
+      try { visitor = localStorage.getItem("mewhelp.visitor") || visitor; localStorage.setItem("mewhelp.visitor",visitor); } catch {}
+      try { lastConversation = localStorage.getItem("mewhelp.activeConversation"); } catch {}
+      const visitorHeaders = { "X-Visitor-Id": visitor };
+      async function refreshConversations() {
+        // 多次刷新可并行返回，只允许最后发出的那次更新侧栏，避免旧列表覆盖新会话。
+        const version=++sidebarVersion;
+        try {
+          const response = await fetch("/api/conversations",{headers:visitorHeaders});
+          if (!response.ok) return;
+          const items = await response.json(), list = document.querySelector("#conversationList");
+          if (version!==sidebarVersion) return;
+          list.replaceChildren();
+          for (const item of items) {
+            const button = document.createElement("button");
+            button.type = "button"; button.className = "conversation-button";
+            button.textContent = item.preview; button.setAttribute("aria-current",String(item.id===activeConversation));
+            if (item.summarized) { const badge=document.createElement("span"); badge.className="summary-badge"; badge.textContent="已摘要"; button.append(badge); }
+            button.onclick = () => openConversation(item);
+            list.append(button);
+          }
+          return items;
+        } catch {} // 侧栏加载失败不干扰聊天。
+      }
+      async function openConversation(item) {
+        // 回载时阻止发送/新建，成功拿到原文后再切session；失败不破坏原先聊天界面。
+        if (busy) return;
+        busy=true; send.disabled=true; reset.disabled=true;
+        try {
+          const response=await fetch(`/api/conversations/${item.id}/messages`,{headers:visitorHeaders});
+          if (!response.ok) return;
+          const saved=await response.json();
+          session=saved.session_id; activeConversation=item.id;
+          try { localStorage.setItem("mewhelp.activeConversation",item.id); } catch {}
+          messages.replaceChildren();
+          // 展示数据库原文，不把模型的摘要/截短窗口作为历史聊天气泡。
+          for (const message of saved.messages) {
+            const reply=bubble(message.content,message.role==="human");
+            if (message.id===saved.target_message_id && message.role==="ai") {
+              // 仅恢复服务端当前仍有效的建议，确认动作继续走独立API。
+              if (saved.actions) renderSupportOptions(reply,saved.actions,session);
+              if (saved.refund_offer) renderRefundOffer(reply,saved.refund_offer,session);
+            }
+          }
+          if (saved.order_selection) renderOrderSelection(bubble("请选择需要处理的演示订单。"),saved.order_selection,session);
+          // 待选卡片的ownerSession使用规范ID，刷新后仍恢复同一个PG线程。
+          status.textContent="已载入完整历史 · 可以继续追问";
+          await refreshConversations();
+        } catch {} finally { busy=false; send.disabled=false; reset.disabled=false; input.focus(); }
+      }
+      // 只在初次加载尝试恢复上次会话；普通列表刷新不会强制打断用户当前对话。
+      refreshConversations().then((items)=>{ const previous=items?.find((item)=>item.id===lastConversation); if (previous) openConversation(previous); });
       // 创建消息节点；textContent 把模型内容当文本，避免作为 HTML 执行。
       // 当前没有 Markdown 渲染，因此 ** 等标记会按原文显示。
       // Ch02：气泡容器同时容纳工具轨迹和正文，但返回的是正文 span。
@@ -588,7 +642,7 @@
               // 只有建单走此分支。offer_id是服务端保存的建议ID，重试仍提交同一个ID。
               const response = await fetch("/api/chat/tickets", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", ...visitorHeaders },
                 body: JSON.stringify({ session_id: ownerSession, offer_id: offer.offer_id, confirmed: true, ...confirmed }),
               });
               const result = await response.json();
@@ -658,7 +712,7 @@
             confirm.disabled = true;
             note.textContent = "正在提交…";
             try {
-              const response = await fetch("/api/chat/refunds", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_id:ownerSession,offer_id:offer.offer_id,reason:reason.value,description:document.querySelector("#refundDescription").value.trim(),confirmed:true})});
+              const response = await fetch("/api/chat/refunds", {method:"POST",headers:{"Content-Type":"application/json",...visitorHeaders},body:JSON.stringify({session_id:ownerSession,offer_id:offer.offer_id,reason:reason.value,description:document.querySelector("#refundDescription").value.trim(),confirmed:true})});
               const result = await response.json();
               if (!response.ok || !result.ok) throw Error(result.detail || "暂时无法确认结果，请用同一表单重试");
               button.disabled = true;
@@ -746,6 +800,8 @@
           const item = JSON.parse(payload);
           // workflow用于开发日志检查，不将内部节点名展示成客服对话正文。
           if (event === "workflow") return;
+          // 此事件携带cid/规范ID而非答复，不追加到气泡；本轮已发出的按钮仍使用其原ownerSession。
+          if (event === "conversation") { activeConversation=item.id; try { localStorage.setItem("mewhelp.activeConversation",item.id); } catch {} refreshConversations(); return; }
           if (event === "order_selection") { orderSelection = item; return; }
           if (event === "refund_offer") { refundOffer = item; return; }
           if (event === "actions") {
@@ -798,7 +854,7 @@
         try {
           const response = await fetch(selection ? "/api/chat/orders" : "/api/chat", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json", ...visitorHeaders },
             body: JSON.stringify(selection ? {session_id: selection.ownerSession, selection_id: selection.selection_id, order_id: selection.order_id} : {
               session_id: session,
               message: text,
@@ -866,6 +922,7 @@
           busy = false;
           send.disabled = false;
           reset.disabled = false;
+          refreshConversations();
           input.focus();
         }
       }
@@ -883,10 +940,14 @@
       });
       reset.addEventListener("click", () => {
         session = crypto.randomUUID();
+        activeConversation = null;
+        // 清理本地“当前选中”，不删除访客ID、服务器旧会话或checkpoint。
+        try { localStorage.removeItem("mewhelp.activeConversation"); } catch {}
         messages.replaceChildren();
         bubble("新的对话开始啦，有什么可以帮你？");
         status.textContent = "已开启新对话";
         input.focus();
+        refreshConversations();
       });
       document.querySelectorAll(".chips button").forEach(
         (b) =>

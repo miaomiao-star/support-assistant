@@ -69,4 +69,9 @@ class CompatibleChatOpenAI(ChatOpenAI):
                 value = message.additional_kwargs.get("reasoning_content")
                 if isinstance(value, str):
                     wire["reasoning_content"] = value
+        # Ch07只在显式模型上下文作用域内记录最终载荷，不记录HTTP头或密钥。
+        from app.context.observability import log_payload
+
+        # 放在reasoning回填之后才知道真实载荷；日志函数自行去隐藏推理，不改发送给上游的字典。
+        log_payload(payload)
         return payload

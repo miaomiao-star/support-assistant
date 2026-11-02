@@ -12,7 +12,11 @@ from app.api.kb import router as kb_router
 from app.knowledge.runtime import build_service, ROOT
 from app.knowledge.jobs import Jobs
 from fastapi.responses import FileResponse
-from app.workflow.routing import build_graph
+from app.workflow.conversation import build_graph, prefix_tokens, Context
+from app.context.budget import ContextBudget
+from app.context.summary import SummaryTasks
+from app.context.observability import setup_logging, event
+from app.tools.registry import ToolRegistry
 from app.workflow.persistence import open_checkpointer
 
 
@@ -34,7 +38,9 @@ def create_app(
         """
         启动时加载并校验配置；这里只校验字段，不请求模型验证密钥或模型名。
         """
-        get_settings()
+        settings = get_settings()
+        # Ch07原文上下文写独立本地日志；只配置handler，不在启动时打印私有Settings。
+        setup_logging(Path(__file__).resolve().parent.parent)
         # 测试可传入独立 database；真实启动读取 .env.mysql 创建异步 MySQL 引擎。
         # 挂到 app.state 的是应用共享资源，不是某个浏览器的聊天历史。
         application.state.database = database or Database(DatabaseSettings().url())
@@ -65,9 +71,37 @@ def create_app(
                     # 编译图只做节点/边/状态与saver的组装；这里不发起LLM对话。
                     # 图由整个应用共享，真正的请求依赖通过Runtime Context逐轮传入。
                     application.state.workflow = (graph_factory or build_graph)(saver)
+                    if getattr(application.state.workflow, 'layered_context', False):
+                        # 历史图不套本章预算；正式图先验证公式，再核验真实System+工具Schema额度。
+                        budget = ContextBudget.from_settings(settings)
+                        measured = prefix_tokens(
+                            Context(
+                                None, None, None, settings, ToolRegistry(None, 0, ''), 0
+                            )
+                        )
+                        # 临时注册表只为读取Schema，None仓库不会被执行；这一步不请求任何模型。
+                        if measured > settings.context_system_reserve:
+                            raise ValueError(
+                                '上下文预算不足：系统和工具定义超过配置保留量，请一起校准预算'
+                            )
+                        event(
+                            'context startup',
+                            history=budget.history,
+                            layer1=budget.layer1,
+                            layer2=budget.layer2,
+                            react_peak=budget.react_peak,
+                            prefix_tokens=measured,
+                            system_reserve=settings.context_system_reserve,
+                            zh_chars_pre_token=settings.zh_chars_pre_token,
+                            ascii_chars_per_token=settings.context_ascii_chars_per_token,
+                        )
+                        application.state.summary_tasks = SummaryTasks()
+                        # 应用只建一份任务注册表，HTTP每轮只注入引用，才能按会话去重后台任务。
                 yield
         finally:
             # 先收敛后台任务，再关闭其依赖的向量连接和数据库，避免使用已关闭资源。
+            if getattr(application.state, 'summary_tasks', None):
+                await application.state.summary_tasks.close()
             await application.state.kb_jobs.close()
             await application.state.knowledge.close()
             # 正常关闭或启动检查失败，都清理已经创建的数据库引擎。
@@ -79,7 +113,7 @@ def create_app(
     # 生产默认只走 LangGraph；显式关闭仅供旧章节适配器回归使用。
     application.state.workflow = None
     # SessionStore 保留第一章接口便于回归；新聊天流程只使用它的 lock()。
-    # Ch05历史优先读checkpoint，首次引入旧历史才调用ChatRepository.history()。
+    # Ch07从checkpoint延续完整messages；只把SQL中尚未见过的文本审计补入，不替换工具流水。
     # app.state 是应用级共享对象，不是每个请求各建一份。
     # 这里只使用单进程会话锁；checkpointer持久化不等于已实现多副本同会话互斥。
     application.include_router(chat_router, prefix="/api", tags=["chat"])

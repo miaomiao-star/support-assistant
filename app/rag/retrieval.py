@@ -165,7 +165,14 @@ class Retriever:
         self.min_score = min_score
 
     async def search_queries(
-        self, primary, queries, filters=None, *, policy=False, after_sales=False
+        self,
+        primary,
+        queries,
+        filters=None,
+        *,
+        policy=False,
+        after_sales=False,
+        top_k=10,
     ):
         """Ch06已理解的Query直接召回；先按主键合并，再对统一候选重排一次。"""
         filters = dict(filters or {})
@@ -199,7 +206,8 @@ class Retriever:
                     ):
                         continue
                 candidates.setdefault(key, {**row, 'score': hit['score']})
-        ranked = await self.reranker.rank(primary, list(candidates.values()), 10)
+        # Ch07传入配置TopK，与上下文公式中的证据预留保持一致；Ch06缺省仍为10。
+        ranked = await self.reranker.rank(primary, list(candidates.values()), top_k)
         return dict(
             raw_question=primary,
             queries=queries,

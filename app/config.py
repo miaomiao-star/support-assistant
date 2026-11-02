@@ -3,7 +3,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, SecretStr
+from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -23,6 +23,7 @@ class Settings(BaseSettings):
         ),
         env_file_encoding="utf-8",
         extra="ignore",  # .env 中未声明的字段不导致加载失败。
+        populate_by_name=True,
     )
 
     chat_api_key: SecretStr = Field(validation_alias="CHAT_API_KEY", min_length=1)
@@ -67,19 +68,27 @@ class Settings(BaseSettings):
     zh_chars_pre_token: float = Field(
         default=1.2, validation_alias="ZH_CHARS_PRE_TOKEN", gt=0, allow_inf_nan=False
     )
-    # 原预算控制文本历史；新增总预算覆盖工具协议及返回数据。
-    # service 会先从总预算预留工具定义，再按较小的文本额度保留历史。
-    # 这些值限制“发送给模型的输入”，并不限制回答字数或模型总运行时间。
+    # 以下旧额度供早期章节/历史图使用；正式Ch07图改走下面model_context_window推导。
     tool_context_budget: int = Field(default=8000, gt=0)
     # 这是单次工具执行超时；只读是否重试由 ToolRegistry 决定。
     tool_timeout_seconds: float = Field(default=5, gt=0, le=60)
     # 图状态使用独立 Postgres；DSN 作为 SecretStr，不能在日志中打印。
     graph_postgres_dsn: SecretStr | None = None
     # max_steps按LLM决策次数计，不是图节点数，也不是工具调用次数。
-    agent_max_steps: int = Field(default=6, ge=1, le=20)
+    agent_max_steps: int = Field(
+        default=6,
+        ge=1,
+        le=20,
+        validation_alias=AliasChoices('MAX_AGENT_STEPS', 'AGENT_MAX_STEPS'),
+    )
     # 每次模型输出的硬上限，区别于前面控制输入上下文的tool_context_budget。
-    agent_output_token_limit: int = Field(default=600, ge=1, le=4000)
-    # 累加Agent多次输入/输出的估算消耗；重复发出的历史同样计入。
+    agent_output_token_limit: int = Field(
+        default=600,
+        ge=1,
+        le=4000,
+        validation_alias=AliasChoices('MAX_OUTPUT_TOKENS', 'AGENT_OUTPUT_TOKEN_LIMIT'),
+    )
+    # Ch05旧图的累计调用额度；Ch07仍记累计用量，但执行限制取窗口、峰值、步数和超时。
     agent_total_token_budget: int = Field(default=24000, gt=0)
     # 覆盖分类、检索及全部Agent/工具步的整轮墙钟超时，不只限制一个工具。
     workflow_timeout_seconds: float = Field(default=180, gt=0, le=600)
@@ -88,6 +97,24 @@ class Settings(BaseSettings):
         default=0.65, ge=0, le=1, allow_inf_nan=False
     )
     intent_small_model: str | None = None
+    # Ch07运行窗口必须与上游能力核对。默认对应当前flash官方1M窗口；可保守下调。
+    model_context_window: int = Field(default=1_000_000, gt=0)
+    # 单轮硬上限同时参与倒推：用户原话由API拦截；过大工具结果保留原State但停止后续模型。
+    max_user_input_tokens: int = Field(default=2000, gt=0)
+    tool_result_max_tokens: int = Field(default=1200, gt=0)
+    rerank_top_k: int = Field(default=10, ge=1, le=50)
+    # 预留开销需和实际输入同步：prefix启动自检，证据/摘要在装配时按整块控制。
+    context_system_reserve: int = Field(default=1200, gt=0)
+    context_evidence_per_hit: int = Field(default=350, gt=0)
+    context_summary_budget: int = Field(default=1000, gt=0)
+    context_safety_margin: int = Field(default=800, gt=0)
+    context_intermediate_tokens: int = Field(default=600, gt=0)
+    # “想留的量”和“装得下的量”取小；R×S不是模型窗口，也不是消息行数阈值。
+    context_target_rounds: int = Field(default=64, ge=1)
+    context_steady_round_tokens: int = Field(default=2000, gt=0)
+    context_assistant_prefix_chars: int = Field(default=60, ge=1)
+    # 与保留预算共同校准；名字虽叫ASCII，实际计数器将所有非CJK字符归入此口径。
+    context_ascii_chars_per_token: float = Field(default=4.0, gt=0, allow_inf_nan=False)
 
 
 @lru_cache

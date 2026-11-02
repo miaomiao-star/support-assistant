@@ -1,4 +1,4 @@
-"""四张表的 ORM 映射，真实建表仍以 sql/ch02-ddl.sql 为准。"""
+"""会话/消息/业务与分段摘要ORM；真实建表及变更以sql各章DDL为准。"""
 
 from datetime import datetime
 
@@ -12,6 +12,8 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    UniqueConstraint,
+    Index,
 )
 from sqlalchemy.dialects.mysql import BIGINT
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -39,12 +41,17 @@ class Conversation(Base):
     # Mapped[int] 是 ORM 属性类型声明；mapped_column 描述对应的数据库列。
     # 本项目仓库会显式写入由 session_id 派生的稳定主键。
     id: Mapped[int] = mapped_column(ID, primary_key=True, autoincrement=True)
-    # 当前保存完整会话摘要用于碰撞核验，还不是账号系统中的真实用户 ID。
+    # Ch07保存匿名访客摘要用于分组；历史路径保存session摘要，均不是正式账号ID。
     user_id: Mapped[str] = mapped_column(String(64), index=True)
     # default 由 ORM 插入时提供；真实表 SQL 中也有 DEFAULT，两者应保持一致。
     status: Mapped[str] = mapped_column(
         Enum('进行中', '已转人工', '已结束'), default='进行中'
     )
+    # Ch07原DDL：summary是段的投影，两个ID划分发送视图，消息原文不搬动。
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # summary_upto是已覆盖末行；layer1_from是层2末行，两者端点都不属于下一层。
+    summary_upto_msg_id: Mapped[int | None] = mapped_column(ID, nullable=True)
+    layer1_from_msg_id: Mapped[int | None] = mapped_column(ID, nullable=True)
     # server_default 由数据库产生时间；onupdate 是 ORM 更新此行时带上的值。
     # DateTime 对应既有 DATETIME，不携带时区；当前没有做时间显示的时区转换。
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
@@ -53,9 +60,27 @@ class Conversation(Base):
     )
 
 
+class ConversationSummary(Base):
+    # 事实段独立存表：每次新任务INSERT一段，不把旧段当输入反复压成同一条summary。
+    __tablename__ = 'conversation_summaries'
+    __table_args__ = (
+        # seq在同一会话内唯一；范围索引用于按会话/覆盖位置定位段，不承担跨会话记忆检索。
+        UniqueConstraint('conversation_id', 'seq', name='uk_conv_seq'),
+        Index('idx_conv_upto', 'conversation_id', 'upto_msg_id'),
+    )
+    id: Mapped[int] = mapped_column(ID, primary_key=True, autoincrement=True)
+    conversation_id: Mapped[int] = mapped_column(ID)
+    seq: Mapped[int] = mapped_column(Integer)
+    from_msg_id: Mapped[int] = mapped_column(ID)
+    # from/upto为该批原始消息的闭区间；全库消息ID可有间隔，不代表逐个ID都属于本会话。
+    upto_msg_id: Mapped[int] = mapped_column(ID)
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class Message(Base):
     # 一条记录对应协议中的一条消息，不是整个问答轮次。
-    # 带工具的一轮通常为 user → assistant(申请) → tool(结果) → assistant(回答)。
+    # 历史章节也存tool结果；Ch07只存user/assistant，完整tool观察单独保留在图State。
     __tablename__ = 'messages'
     id: Mapped[int] = mapped_column(ID, primary_key=True, autoincrement=True)
     # 外键要求所属会话存在；索引帮助按会话查询流水，不会自动加载聊天历史。
