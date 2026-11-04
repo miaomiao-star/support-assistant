@@ -57,6 +57,9 @@ class Context(routing.Context):
 def static_tools(context):
     """所有主力调用绑定同一组只读Schema；执行授权还需节点检查。"""
     # 工具定义每轮一致，执行权限由模式和工具节点校验，不靠变更Schema来授权。
+    if getattr(context.registry, 'unified_tools', False):
+        # Ch08返回冻结目录的全部Schema（含可申请预览的写工具）；能执行仍由引擎把关。
+        return context.registry.model_tools()
     return [
         tool for name, tool in context.registry.tools.items() if name in base.READ_TOOLS
     ]
@@ -66,7 +69,8 @@ def prefix_tokens(context):
     """启动时按真实工具Schema和固定System计数，不发模型请求、不执行工具。"""
     schemas = [convert_to_openai_tool(tool) for tool in static_tools(context)]
     return count_tokens(
-        [SystemMessage(content=SYSTEM)], context.settings
+        [SystemMessage(content=getattr(context.registry, 'system_prompt', SYSTEM))],
+        context.settings,
     ) + text_tokens(json.dumps(schemas, ensure_ascii=False), context.settings)
 
 
@@ -405,6 +409,9 @@ async def model_messages(state, context):
         evidence=state['evidence'],
         confirmed_order=state.get('order_snapshot'),
     )
+    if getattr(context.registry, 'unified_tools', False):
+        # 仅补业务模式/客户来源/不可用Server；完整历史仍经原有三层投影装配。
+        bundle.update(context.registry.extra_bundle(state))
     # 当前ReAct原生链排在bundle之后；确定性查单已在bundle，不伪造模型工具协议。
     current = [
         message
@@ -416,7 +423,7 @@ async def model_messages(state, context):
     # m:/t:属于骨架当前审计，已由bundle携带订单事实；react:/final:才是本轮模型协议。
     # 历史原文另外通过view.messages进入，此处不能再把整个State.messages铺一次。
     return [
-        SystemMessage(content=SYSTEM),
+        SystemMessage(content=getattr(context.registry, 'system_prompt', SYSTEM)),
         *wire_history(view.messages),
         HumanMessage(content=state['raw_question'], name='current_question'),
         HumanMessage(
@@ -527,9 +534,11 @@ async def agent(state, runtime):
             trace=trace,
             **updates,
         )
-    if (
-        state['intent'] in ('退款退货', '售后', '其他')
-        or len(calls) != 1
+    unified = getattr(context.registry, 'unified_tools', False)
+    # 旧图保留原只读限制；新图把申请交给统一工具节点做校验、模式/权限与预览判定。
+    if not unified and (
+        len(calls) != 1
+        or state['intent'] in ('退款退货', '售后', '其他')
         or calls[0]['name'] not in base.READ_TOOLS
     ):
         # 核心订单/政策已由骨架完成；这些模式即便收到合法工具名也不能再让Agent执行。
@@ -555,6 +564,8 @@ async def agent(state, runtime):
         messages=[message],
         answer=state['answer'] + visible,
         pending_call=call,
+        # 兼容上游忽略禁并行参数：保留整批申请，下一节点逐条回灌纠错，不能只执行首个。
+        **({'pending_batch': calls if len(calls) > 1 else None} if unified else {}),
         tool_request_message_id=sql_id,
         seen_calls=[*state['seen_calls'], key, call['id']],
         trace=trace,

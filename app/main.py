@@ -12,7 +12,12 @@ from app.api.kb import router as kb_router
 from app.knowledge.runtime import build_service, ROOT
 from app.knowledge.jobs import Jobs
 from fastapi.responses import FileResponse
-from app.workflow.conversation import build_graph, prefix_tokens, Context
+from app.workflow.conversation import prefix_tokens, Context
+from app.workflow.tooling import build_graph
+from app.tools.runtime import ToolRuntime
+from app.tools.catalog import LocalPolicy
+from app.tools.runtime import UnifiedRegistry
+import json
 from app.context.budget import ContextBudget
 from app.context.summary import SummaryTasks
 from app.context.observability import setup_logging, event
@@ -71,16 +76,50 @@ def create_app(
                     # 编译图只做节点/边/状态与saver的组装；这里不发起LLM对话。
                     # 图由整个应用共享，真正的请求依赖通过Runtime Context逐轮传入。
                     application.state.workflow = (graph_factory or build_graph)(saver)
-                    if getattr(application.state.workflow, 'layered_context', False):
-                        # 历史图不套本章预算；正式图先验证公式，再核验真实System+工具Schema额度。
-                        budget = ContextBudget.from_settings(settings)
-                        measured = prefix_tokens(
-                            Context(
-                                None, None, None, settings, ToolRegistry(None, 0, ''), 0
+                    if getattr(application.state.workflow, 'unified_tools', False):
+                        # 仅正式统一工具图创建应用共享runtime；测试注入数据库时不连接外部MCP。
+                        connections = (
+                            {}
+                            if database
+                            else json.loads(
+                                (ROOT / 'config/mcp-servers.json').read_text(
+                                    encoding='utf-8'
+                                )
                             )
                         )
+                        application.state.tool_runtime = ToolRuntime(
+                            connections=connections
+                        )
+                        await application.state.tool_runtime.refresh()
+                        # 启动先登记内置/本地/MCP工具；每次聊天执行段还会刷新，支持运行中新增。
+                    if getattr(application.state.workflow, 'layered_context', False):
+                        # 历史图不套本章预算；正式图先验证公式，再核验真实System+工具Schema额度。
+                        budget_settings = settings
+                        registry = ToolRegistry(None, 0, '')
+                        if getattr(application.state.workflow, 'unified_tools', False):
+                            from app.workflow.tooling import SYSTEM
+
+                            budget_settings = settings.model_copy(
+                                # Ch08工具增多，复制预算配置使用独立预留，不改旧章Settings对象。
+                                update={
+                                    'context_system_reserve': settings.tool_system_reserve
+                                }
+                            )
+                            registry = UnifiedRegistry(
+                                application.state.tool_runtime.catalog.snapshot(),
+                                LocalPolicy(),
+                                None,
+                                0,
+                                '',
+                                budget_settings,
+                            )
+                            registry.system_prompt = SYSTEM
+                        budget = ContextBudget.from_settings(budget_settings)
+                        measured = prefix_tokens(
+                            Context(None, None, None, budget_settings, registry, 0)
+                        )
                         # 临时注册表只为读取Schema，None仓库不会被执行；这一步不请求任何模型。
-                        if measured > settings.context_system_reserve:
+                        if measured > budget_settings.context_system_reserve:
                             raise ValueError(
                                 '上下文预算不足：系统和工具定义超过配置保留量，请一起校准预算'
                             )
@@ -91,7 +130,7 @@ def create_app(
                             layer2=budget.layer2,
                             react_peak=budget.react_peak,
                             prefix_tokens=measured,
-                            system_reserve=settings.context_system_reserve,
+                            system_reserve=budget_settings.context_system_reserve,
                             zh_chars_pre_token=settings.zh_chars_pre_token,
                             ascii_chars_per_token=settings.context_ascii_chars_per_token,
                         )

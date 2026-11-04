@@ -478,6 +478,7 @@
             }
           }
           if (saved.order_selection) renderOrderSelection(bubble("请选择需要处理的演示订单。"),saved.order_selection,session);
+          if (saved.ticket_preview) renderTicketPreview(bubble("请核对工单内容，确认后才会提交。"),saved.ticket_preview,session);
           // 待选卡片的ownerSession使用规范ID，刷新后仍恢复同一个PG线程。
           status.textContent="已载入完整历史 · 可以继续追问";
           await refreshConversations();
@@ -681,6 +682,35 @@
         messages.scrollTop = messages.scrollHeight;
       }
 
+      function renderTicketPreview(reply, preview, ownerSession) {
+        // 预览文字全用textContent；按钮只传服务端凭据，不把类型/描述重新提交。
+        // ownerSession把卡片绑定原会话；切到其他对话后，旧卡片不能代替当前会话确认。
+        const box=document.createElement("div");
+        box.className="order-picker ticket-preview";
+        box.setAttribute("aria-label","工单预览");
+        const title=document.createElement("strong"), details=document.createElement("p"), note=document.createElement("p");
+        title.textContent="工单预览 · "+preview.ticket_type;
+        details.textContent=preview.description;
+        details.style.whiteSpace="pre-wrap";
+        note.textContent="确认提交后创建待处理工单，取消则不提交。";
+        box.append(title,details,note);
+        for (const [confirmed,label] of [[true,"确认提交"],[false,"取消"]]) {
+          const button=document.createElement("button");
+          button.type="button"; button.textContent=label; button.className="ticket-decision";
+          button.dataset.confirmed=String(confirmed);
+          button.onclick=()=> {
+            if (busy || session!==ownerSession) return;
+            submit({ticketPreview:true,preview_id:preview.preview_id,confirmed,ownerSession,box});
+          };
+          box.append(button);
+        }
+        reply.parentElement.append(box);
+        // create_ticket在此只是申请，状态显示“待确认”，不能提前显示“创建成功”。
+        const badge=reply.parentElement.querySelector('.tool-badge[data-status="running"]');
+        if (badge) {badge.dataset.status="waiting"; badge.textContent="create_ticket · 待确认";}
+        messages.scrollTop=messages.scrollHeight;
+      }
+
       function renderRefundOffer(reply, offer, ownerSession) {
         const box = document.createElement("div"), button = document.createElement("button");
         box.className = "support-options";
@@ -744,7 +774,8 @@
       // 发送流程：锁定发送按钮 → 显示用户消息 → 读取 SSE → 完成/报错后恢复按钮。
       // busy 避免一页内同时发多轮，防止上下文先后顺序交错。
       async function submit(selection = null) {
-        const text = selection ? "我选择订单 " + selection.order_id : input.value.trim();
+        // 工单选择复用SSE读取/展示流程，但请求只带preview_id和严格布尔选择。
+        const text = selection?.ticketPreview ? (selection.confirmed ? "确认提交这份工单" : "取消这份工单") : selection ? "我选择订单 " + selection.order_id : input.value.trim();
         if (!text || busy) return;
         busy = true;
         send.disabled = true;
@@ -752,6 +783,7 @@
         input.value = "";
         // 新问题结束旧等待；点选期间防止重复点击。失败时只恢复本次卡片。
         document.querySelectorAll(".order-card").forEach((button) => { button.disabled = true; });
+        document.querySelectorAll(".ticket-decision").forEach((button) => { button.disabled = true; });
         document.querySelector(".intro")?.remove();
         bubble(text, true);
         const reply = bubble("正在思考…");
@@ -764,7 +796,8 @@
           evidence = [],
           actions = null,
           orderSelection = null,
-          refundOffer = null;
+          refundOffer = null,
+          ticketPreview = null;
         // 网络 chunk 可能有多个字；队列每 18ms 显示一个 Unicode 码点。
         // 这是视觉打字效果，不是 tokenizer 级别的计数；组合 emoji 仍可能分开显示。
         const timer = setInterval(() => {
@@ -804,6 +837,8 @@
           if (event === "conversation") { activeConversation=item.id; try { localStorage.setItem("mewhelp.activeConversation",item.id); } catch {} refreshConversations(); return; }
           if (event === "order_selection") { orderSelection = item; return; }
           if (event === "refund_offer") { refundOffer = item; return; }
+          // 卡片先暂存，收到DONE且正文绘制完再渲染，避免失败半轮留下可点击预览。
+          if (event === "ticket_preview") { ticketPreview = item; return; }
           if (event === "actions") {
             // 先暂存建议，等本轮DONE且正文绘制完成才渲染，失败轮不会留下可点按钮。
             actions = item;
@@ -852,10 +887,10 @@
         // TextDecoder 的 stream 模式处理中文 UTF-8 字节被拆到不同网络片段的情况。
         // 收到 DONE 后等逐字队列显示完，再允许下一轮发送。
         try {
-          const response = await fetch(selection ? "/api/chat/orders" : "/api/chat", {
+          const response = await fetch(selection?.ticketPreview ? "/api/chat/tickets/resume" : selection ? "/api/chat/orders" : "/api/chat", {
             method: "POST",
             headers: { "Content-Type": "application/json", ...visitorHeaders },
-            body: JSON.stringify(selection ? {session_id: selection.ownerSession, selection_id: selection.selection_id, order_id: selection.order_id} : {
+            body: JSON.stringify(selection?.ticketPreview ? {session_id:selection.ownerSession,preview_id:selection.preview_id,confirmed:selection.confirmed} : selection ? {session_id: selection.ownerSession, selection_id: selection.selection_id, order_id: selection.order_id} : {
               session_id: session,
               message: text,
               filters: {
@@ -893,12 +928,17 @@
           if (!done) throw Error("连接中断，回复未完成，请重试");
           while (pending) await new Promise((r) => setTimeout(r, 25));
           renderCitations(reply, output, evidence);
-          if (!orderSelection) feedback(reply);
+          if (!orderSelection && !ticketPreview) feedback(reply);
+          // 暂停等待操作时先展示卡片；还未得到最终业务答复，不显示满意度按钮。
           if (orderSelection) renderOrderSelection(reply, orderSelection, replySession);
           if (refundOffer) renderRefundOffer(reply, refundOffer, replySession);
+          if (ticketPreview) {
+            if (!output) reply.textContent="请核对工单内容，确认后才会提交。";
+            renderTicketPreview(reply,ticketPreview,replySession);
+          }
           // 普通聊天不等待用户选择；这只是当前回答附带的一组可选操作。
           if (actions) renderSupportOptions(reply, actions, replySession);
-          status.textContent = "回复完成 · 可以继续追问";
+          status.textContent = ticketPreview ? "等待确认 · 核对后提交或取消" : "回复完成 · 可以继续追问";
         } catch (error) {
           // 保留部分文本并显示错误；工具操作流水已保存，半截最终回复不入库。
           output += pending;
@@ -909,7 +949,8 @@
           note.textContent = error.message;
           reply.parentElement.append(note);
           status.textContent = "本轮未完成，可重新发送";
-          if (selection && session === selection.ownerSession) selection.box.querySelectorAll("button").forEach((button) => { button.disabled = button.dataset.orderId !== selection.order_id; });
+          // 写入可能已成功；失败时只恢复原来的确认/取消选择，避免相反选择和重复新申请。
+          if (selection && session === selection.ownerSession) selection.box.querySelectorAll("button").forEach((button) => { button.disabled = selection.ticketPreview ? button.dataset.confirmed !== String(selection.confirmed) : button.dataset.orderId !== selection.order_id; });
         } finally {
           // 成功或失败都释放 reader 和定时器，避免按钮一直锁定。
           clearInterval(timer);

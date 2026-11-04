@@ -15,7 +15,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Index,
 )
-from sqlalchemy.dialects.mysql import BIGINT
+from sqlalchemy.dialects.mysql import BIGINT, TINYINT, INTEGER as MYSQL_INTEGER
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -123,4 +123,39 @@ class Ticket(Base):
     ticket_type: Mapped[str] = mapped_column(Enum('售后', '投诉', '咨询'))
     # 创建成功只表示“待处理”，不等于人工已经解决问题或执行退款。
     status: Mapped[str] = mapped_column(Enum('待处理', '已处理'), default='待处理')
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class ToolAuditLog(Base):
+    # 原ch08-ddl：不挂外键，日志失败不得影响业务工具。
+    __tablename__ = 'tool_audit_logs'
+    __table_args__ = (
+        Index('idx_conversation_id', 'conversation_id'),
+        Index('idx_tool_name', 'tool_name'),
+        Index('idx_status', 'status'),
+    )
+    id: Mapped[int] = mapped_column(ID, primary_key=True, autoincrement=True)
+    # 原表允许无会话的诊断调用；没有外键，也不因会话记录不可用而阻止记审计。
+    conversation_id: Mapped[int | None] = mapped_column(ID, nullable=True)
+    tool_call_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    tool_name: Mapped[str] = mapped_column(String(128))
+    tool_source: Mapped[str] = mapped_column(Enum('builtin', 'mcp'))
+    mcp_server: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    arguments: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 摘要由引擎截长，完整观察保留在图State；这里不承担上下文恢复。
+    result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(
+        Enum('成功', '失败', '超时', '校验拦下', '权限拒绝')
+    )
+    error_message: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # 记录额外重试次数而非尝试总数；写操作为0，真实MySQL类型按原DDL使用unsigned。
+    retry_count: Mapped[int] = mapped_column(
+        Integer().with_variant(TINYINT(unsigned=True), 'mysql'),
+        default=0,
+        server_default='0',
+    )
+    duration_ms: Mapped[int | None] = mapped_column(
+        Integer().with_variant(MYSQL_INTEGER(unsigned=True), 'mysql'), nullable=True
+    )
+    # 由数据库记落库时间；duration_ms另由引擎单调时钟测量，不能用两者相减代替。
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

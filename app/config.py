@@ -102,6 +102,9 @@ class Settings(BaseSettings):
     # 单轮硬上限同时参与倒推：用户原话由API拦截；过大工具结果保留原State但停止后续模型。
     max_user_input_tokens: int = Field(default=2000, gt=0)
     tool_result_max_tokens: int = Field(default=1200, gt=0)
+    # Ch08动态工具定义需要独立预留；旧Ch07演示公式仍使用原context_system_reserve。
+    # 预留值不是实测大小；启动及每执行段都再核验实际System+Schema，超出就明确失败。
+    tool_system_reserve: int = Field(default=3000, gt=0)
     rerank_top_k: int = Field(default=10, ge=1, le=50)
     # 预留开销需和实际输入同步：prefix启动自检，证据/摘要在装配时按整块控制。
     context_system_reserve: int = Field(default=1200, gt=0)

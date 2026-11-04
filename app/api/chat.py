@@ -23,6 +23,8 @@ from app.refunds import OrderSelection, RefundSubmission
 from app.context.store import ContextRepository
 from app.context.budget import text_tokens, ContextBudget
 from app.workflow.conversation_service import ConversationService
+from app.workflow.tooling_service import ToolingService
+from app.schemas.tooling import TicketDecision
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -50,6 +52,10 @@ def workflow_service(request, repo, model, settings):
     if service_class is ConversationService:
         # 注册表应用共享，但其余仓库/工具上下文仍按请求独立，不能共享可变AsyncSession。
         arguments['summaries'] = request.app.state.summary_tasks
+        if getattr(graph, 'unified_tools', False):
+            # 共用应用目录，服务内再冻结本段Schema/权限，不能把请求仓库放进共享runtime。
+            service_class = ToolingService
+            arguments['tools'] = request.app.state.tool_runtime
     return service_class(
         graph,
         repo,
@@ -193,6 +199,7 @@ async def chat(
                             "order_selection",
                             "refund_offer",
                             "conversation",
+                            "ticket_preview",
                         ):
                             # 命名事件分别携带工具状态、来源、执行事实和按钮建议。
                             # type只用于后端分流；发送event名称后去掉内部type键。
@@ -277,6 +284,65 @@ async def select_order(
                     dict(
                         error='upstream_error',
                         message='选单后处理未完成，请用同一订单卡片重试核对',
+                    ),
+                    'error',
+                )
+
+    return StreamingResponse(
+        stream(),
+        media_type='text/event-stream',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
+    )
+
+
+@router.post('/chat/tickets/resume', response_class=StreamingResponse)
+async def resume_ticket_preview(
+    body: TicketDecision,
+    request: Request,
+    settings: Annotated[Settings, Depends(get_settings)],
+    model=Depends(get_chat_model),
+    repo=Depends(get_repository),
+):
+    """页面只传凭据与确认选择，实际工具参数只从服务端checkpoint读取。"""
+    if not getattr(
+        getattr(request.app.state, 'workflow', None), 'unified_tools', False
+    ):
+        raise HTTPException(503, '工具确认流程未启用')
+    try:
+        lock_key = await lock_identity(repo, body.session_id)
+    except LookupError:
+        raise HTTPException(404, '会话不存在') from None
+
+    async def stream():
+        async with request.app.state.sessions.lock(lock_key):
+            # 会话锁只覆盖本次resume执行，不跨预览等待持有；同会话双击按顺序核验。
+            try:
+                service = workflow_service(request, repo, model, settings)
+                async with aclosing(service.resume_ticket(body)) as events:
+                    async for item in events:
+                        if item['type'] == 'delta':
+                            yield sse_frame({'delta': item['delta']})
+                        else:
+                            yield sse_frame(
+                                {k: v for k, v in item.items() if k != 'type'},
+                                item['type'],
+                            )
+                yield sse_frame('[DONE]')
+            except LookupError:
+                yield sse_frame(
+                    dict(
+                        error='preview_expired',
+                        message='这张工单预览已失效，请重新发送建单需求。',
+                    ),
+                    'error',
+                )
+            except Exception as exc:
+                logger.warning('Ticket resume failure: %s', type(exc).__name__)
+                # 错误可能发生在写入后回执生成阶段，提示同预览重试，不能说“一定没建”。
+                yield sse_frame(
+                    dict(
+                        error='upstream_error',
+                        message='本次处理未完成，请用同一预览重试核对；不要重复新建。',
                     ),
                     'error',
                 )
@@ -390,7 +456,10 @@ async def conversation_messages(
     if getattr(graph, 'layered_context', False):
         snapshot = await graph.aget_state(ConversationService.config(f'conv7:{cid}'))
         state = snapshot.values
-        if snapshot.next and state.get('selection'):
+        if snapshot.next == ('ticket_preview',) and state.get('ticket_preview'):
+            # 刷新/切回只恢复服务端预览，不生成批准，不执行工具，也不推进图。
+            result['ticket_preview'] = state['ticket_preview']
+        elif snapshot.next and state.get('selection'):
             # 刷新/切回不能让还有效的订单卡片消失；这里只读暂停凭据，不推进图。
             result['order_selection'] = state['selection']
         elif state:
