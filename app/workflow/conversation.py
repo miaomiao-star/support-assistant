@@ -363,6 +363,10 @@ async def retrieve(state, runtime):
         after_sales=state['intent'] == '售后',
         top_k=context.settings.rerank_top_k,
     )
+    # Ch09只在正式新图注入捕获器，保存真实相关性顺序/分数；旧factory不变。
+    capture = getattr(context.registry, 'capture_retrieval', None)
+    if capture:
+        capture(result)
     # 同一个TopK既影响倒推预算也影响实际重排数，避免配置只改了公式却没限制输入。
     cap = context.settings.rerank_top_k * context.settings.context_evidence_per_hit
     evidence = []
@@ -490,11 +494,13 @@ async def agent(state, runtime):
                 delta = parser.feed(text_delta(chunk))
                 if delta:
                     visible += delta
-                    get_stream_writer()(dict(type='delta', delta=delta))
+                    if not getattr(context.registry, 'defer_text', False):
+                        get_stream_writer()(dict(type='delta', delta=delta))
     tail = parser.finish()
     if tail:
         visible += tail
-        get_stream_writer()(dict(type='delta', delta=tail))
+        if not getattr(context.registry, 'defer_text', False):
+            get_stream_writer()(dict(type='delta', delta=tail))
     if aggregate is None or aggregate.invalid_tool_calls:
         raise ValueError('Invalid agent response')
     usage = aggregate.usage_metadata or {}

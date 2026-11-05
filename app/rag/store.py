@@ -20,19 +20,21 @@ class QualityStore:
     def __init__(self, db):
         self.db = db
 
-    async def low_confidence(self, conversation_id, raw_question, source, reason):
-        """每个拒答轮次调用一次；前端反馈本章不调用此写入口。"""
-        if source not in ('retrieval_low_conf', 'self_check'):
-            raise ValueError('本章反馈不写问题池')
+    async def low_confidence(self, conversation_id, raw_question, source, reason, *, retrieved_chunks=None):
+        """三入口先持久化原话/当轮快照；后台失败仍可从未归并行恢复。"""
+        if source not in ('retrieval_low_conf', 'self_check', 'user_feedback'):
+            raise ValueError('问题池来源无效')
         async with self.db.sessions.begin() as session:
-            session.add(
-                LowConfidenceQuestion(
+            row = LowConfidenceQuestion(
                     conversation_id=conversation_id,
                     raw_question=raw_question,
                     source=source,
                     reason=reason,
-                )
+                    retrieved_chunks=retrieved_chunks,
             )
+            session.add(row)
+            await session.flush()
+            return row.id
 
     async def low_questions(self):
         # 管理页只看最近200条；这里的上限不是数据库保留条数限制。

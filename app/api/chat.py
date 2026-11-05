@@ -25,6 +25,8 @@ from app.context.budget import text_tokens, ContextBudget
 from app.workflow.conversation_service import ConversationService
 from app.workflow.tooling_service import ToolingService
 from app.schemas.tooling import TicketDecision
+from app.workflow.learning_service import LearningService, feedback_records
+from pydantic import BaseModel, ConfigDict, Field
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -56,6 +58,9 @@ def workflow_service(request, repo, model, settings):
             # 共用应用目录，服务内再冻结本段Schema/权限，不能把请求仓库放进共享runtime。
             service_class = ToolingService
             arguments['tools'] = request.app.state.tool_runtime
+            if getattr(graph, 'learning_tools', False):
+                service_class = LearningService
+                arguments['learning'] = request.app.state.learning
     return service_class(
         graph,
         repo,
@@ -200,6 +205,7 @@ async def chat(
                             "refund_offer",
                             "conversation",
                             "ticket_preview",
+                            "answer",
                         ):
                             # 命名事件分别携带工具状态、来源、执行事实和按钮建议。
                             # type只用于后端分流；发送event名称后去掉内部type键。
@@ -354,6 +360,30 @@ async def resume_ticket_preview(
     )
 
 
+class NegativeFeedback(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    session_id: str = Field(min_length=1, max_length=128)
+    feedback_id: str = Field(pattern=r'^[a-f0-9]{32}$')
+
+
+@router.post('/chat/feedback')
+async def negative_feedback(
+    body: NegativeFeedback,
+    request: Request,
+    settings: Annotated[Settings, Depends(get_settings)],
+    model=Depends(get_chat_model),
+    repo=Depends(get_repository),
+):
+    if not getattr(getattr(request.app.state, 'workflow', None), 'learning_tools', False):
+        raise HTTPException(503, '当前图未启用反馈入池')
+    try:
+        key = await lock_identity(repo, body.session_id)
+        async with request.app.state.sessions.lock(key):
+            return await workflow_service(request, repo, model, settings).feedback(body)
+    except LookupError:
+        raise HTTPException(404, '会话或回答轮次不存在') from None
+
+
 @router.post('/chat/refunds')
 async def submit_refund(
     body: RefundSubmission,
@@ -456,6 +486,8 @@ async def conversation_messages(
     if getattr(graph, 'layered_context', False):
         snapshot = await graph.aget_state(ConversationService.config(f'conv7:{cid}'))
         state = snapshot.values
+        if getattr(graph, 'learning_tools', False):
+            result['answer_records'] = await feedback_records(repo.db, cid, state)
         if snapshot.next == ('ticket_preview',) and state.get('ticket_preview'):
             # 刷新/切回只恢复服务端预览，不生成批准，不执行工具，也不推进图。
             result['ticket_preview'] = state['ticket_preview']

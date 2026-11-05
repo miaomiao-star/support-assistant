@@ -13,7 +13,7 @@ from app.knowledge.runtime import build_service, ROOT
 from app.knowledge.jobs import Jobs
 from fastapi.responses import FileResponse
 from app.workflow.conversation import prefix_tokens, Context
-from app.workflow.tooling import build_graph
+from app.workflow.learning import build_graph
 from app.tools.runtime import ToolRuntime
 from app.tools.catalog import LocalPolicy
 from app.tools.runtime import UnifiedRegistry
@@ -23,6 +23,9 @@ from app.context.summary import SummaryTasks
 from app.context.observability import setup_logging, event
 from app.tools.registry import ToolRegistry
 from app.workflow.persistence import open_checkpointer
+from app.learning.runtime import LearningRuntime
+from app.api.learning import router as learning_router
+from app.core.llm import get_chat_model
 
 
 def create_app(
@@ -76,6 +79,18 @@ def create_app(
                     # 编译图只做节点/边/状态与saver的组装；这里不发起LLM对话。
                     # 图由整个应用共享，真正的请求依赖通过Runtime Context逐轮传入。
                     application.state.workflow = (graph_factory or build_graph)(saver)
+                    if getattr(application.state.workflow, 'learning_tools', False):
+                        application.state.learning = LearningRuntime(
+                            application.state.database,
+                            application.state.knowledge,
+                            None if database else get_chat_model(),
+                            testing=bool(database),
+                            model_name=settings.chat_model,
+                        )
+                        # 用户确认：compile后在唯一组装入口绑定一次，后续请求/恢复继承。
+                        application.state.workflow = application.state.learning.tracing.bind(
+                            application.state.workflow
+                        )
                     if getattr(application.state.workflow, 'unified_tools', False):
                         # 仅正式统一工具图创建应用共享runtime；测试注入数据库时不连接外部MCP。
                         connections = (
@@ -136,8 +151,12 @@ def create_app(
                         )
                         application.state.summary_tasks = SummaryTasks()
                         # 应用只建一份任务注册表，HTTP每轮只注入引用，才能按会话去重后台任务。
+                if getattr(application.state, 'learning', None):
+                    await application.state.learning.start()
                 yield
         finally:
+            if getattr(application.state, 'learning', None):
+                await application.state.learning.close()
             # 先收敛后台任务，再关闭其依赖的向量连接和数据库，避免使用已关闭资源。
             if getattr(application.state, 'summary_tasks', None):
                 await application.state.summary_tasks.close()
@@ -151,6 +170,7 @@ def create_app(
     application.state.sessions = SessionStore()
     # 生产默认只走 LangGraph；显式关闭仅供旧章节适配器回归使用。
     application.state.workflow = None
+    application.state.learning = None
     # SessionStore 保留第一章接口便于回归；新聊天流程只使用它的 lock()。
     # Ch07从checkpoint延续完整messages；只把SQL中尚未见过的文本审计补入，不替换工具流水。
     # app.state 是应用级共享对象，不是每个请求各建一份。
@@ -158,6 +178,11 @@ def create_app(
     application.include_router(chat_router, prefix="/api", tags=["chat"])
     application.include_router(extract_router, prefix="/api", tags=["extract"])
     application.include_router(kb_router, prefix="/api")
+    application.include_router(learning_router)
+
+    @application.get('/learning', include_in_schema=False)
+    async def learning_page():
+        return FileResponse(Path(__file__).resolve().parent / 'static' / 'learning.html')
 
     @application.get("/kb", include_in_schema=False)
     async def knowledge_page():

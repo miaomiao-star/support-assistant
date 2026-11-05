@@ -11,6 +11,7 @@ import httpx
 from jsonschema import Draft202012Validator
 from referencing import Registry
 from sqlalchemy.exc import OperationalError
+from app.learning.observability import trace_tool
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +141,7 @@ class ToolEngine:
             return failure('invalid_arguments', '参数Schema无法校验，请联系维护人员。')
         return None
 
+    @trace_tool
     async def execute(
         self,
         call,

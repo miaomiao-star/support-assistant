@@ -341,7 +341,7 @@
       @media(max-width:700px) { #sidebar{width:140px;padding:20px 6px;} main{width:calc(100% - 140px);} header{padding:18px 12px;gap:8px;} header p{display:none;} #messages{padding:16px 12px;} #reset{padding:8px;font-size:12px;} .avatar{display:none;} footer{padding:12px;} }
     </style></head
   ><body>
-    <aside id="sidebar" aria-label="会话侧栏"><h2>我的对话</h2><p>旧对话随时可以继续</p><a class="knowledge-link" href="/kb">知识库管理 →</a><div id="conversationList"></div></aside><main
+    <aside id="sidebar" aria-label="会话侧栏"><h2>我的对话</h2><p>旧对话随时可以继续</p><a class="knowledge-link" href="/kb">知识库管理 →</a><a class="knowledge-link" href="/learning">知识改进 →</a><div id="conversationList"></div></aside><main
       ><header
         ><div class="avatar">🐱</div
         ><div><h1>小喵客服</h1><p>喵喵精选 · 购物与售后咨询</p></div
@@ -471,6 +471,8 @@
           // 展示数据库原文，不把模型的摘要/截短窗口作为历史聊天气泡。
           for (const message of saved.messages) {
             const reply=bubble(message.content,message.role==="human");
+            const answerRecord=(saved.answer_records||[]).find((record)=>record.answer_message_id===message.id);
+            if (answerRecord) feedback(reply,answerRecord);
             if (message.id===saved.target_message_id && message.role==="ai") {
               // 仅恢复服务端当前仍有效的建议，确认动作继续走独立API。
               if (saved.actions) renderSupportOptions(reply,saved.actions,session);
@@ -543,13 +545,13 @@
         }
         reply.append(document.createTextNode(text.slice(at)));
       }
-      // 满意度本章只保存在当前页面节点，不发请求、不写数据库；选择后永久锁定本条。
-      function feedback(reply) {
+      // 👎只提交服务端回答凭据；原话/召回快照由后端按该轮取，不能用页面最新一轮代替。
+      function feedback(reply, record = null) {
         const box = document.createElement("div");
         box.className = "feedback";
         box.setAttribute("aria-label", "回答满意度");
         const note = document.createElement("span");
-        // dataset.voted防重复点击；禁用两个按钮，选择只保留在当前DOM，不调用后端。
+        // 👍维持本地选择；👎待后端确认后才锁定。失败可重试同一凭据，服务端防重。
         for (const [symbol, label] of [
           ["👍", "满意"],
           ["👎", "不满意"],
@@ -558,8 +560,23 @@
           b.type = "button";
           b.textContent = symbol;
           b.setAttribute("aria-label", label);
-          b.onclick = () => {
+          b.disabled=Boolean(record?.voted);
+          b.onclick = async () => {
             if (box.dataset.voted) return;
+            if (label==="不满意") {
+              if (!record) {note.textContent="这条历史回答没有可用的反馈凭据。"; return;}
+              box.querySelectorAll("button").forEach((x)=>(x.disabled=true));
+              note.textContent="正在记录…";
+              try {
+                const response=await fetch("/api/chat/feedback",{method:"POST",headers:{"Content-Type":"application/json",...visitorHeaders},body:JSON.stringify({session_id:record.session_id,feedback_id:record.feedback_id})});
+                if(!response.ok) throw Error("反馈未完成，请重试");
+                await response.json();
+              } catch(error) {
+                note.textContent=error.message;
+                box.querySelectorAll("button").forEach((x)=>(x.disabled=false));
+                return;
+              }
+            }
             box.dataset.voted = label;
             b.classList.add("selected");
             b.setAttribute("aria-pressed", "true");
@@ -569,6 +586,7 @@
           box.append(b);
         }
         box.append(note);
+        if (record?.voted) note.textContent="已反馈，问题已进入改进流程";
         reply.parentElement.append(box);
       }
       // 两个选项各自确认：转人工只模拟界面，建工单才发写入请求。
@@ -797,7 +815,8 @@
           actions = null,
           orderSelection = null,
           refundOffer = null,
-          ticketPreview = null;
+          ticketPreview = null,
+          answerRecord = null;
         // 网络 chunk 可能有多个字；队列每 18ms 显示一个 Unicode 码点。
         // 这是视觉打字效果，不是 tokenizer 级别的计数；组合 emoji 仍可能分开显示。
         const timer = setInterval(() => {
@@ -839,6 +858,7 @@
           if (event === "refund_offer") { refundOffer = item; return; }
           // 卡片先暂存，收到DONE且正文绘制完再渲染，避免失败半轮留下可点击预览。
           if (event === "ticket_preview") { ticketPreview = item; return; }
+          if (event === "answer") { answerRecord = item; return; }
           if (event === "actions") {
             // 先暂存建议，等本轮DONE且正文绘制完成才渲染，失败轮不会留下可点按钮。
             actions = item;
@@ -928,7 +948,7 @@
           if (!done) throw Error("连接中断，回复未完成，请重试");
           while (pending) await new Promise((r) => setTimeout(r, 25));
           renderCitations(reply, output, evidence);
-          if (!orderSelection && !ticketPreview) feedback(reply);
+          if (!orderSelection && !ticketPreview) feedback(reply,answerRecord);
           // 暂停等待操作时先展示卡片；还未得到最终业务答复，不显示满意度按钮。
           if (orderSelection) renderOrderSelection(reply, orderSelection, replySession);
           if (refundOffer) renderRefundOffer(reply, refundOffer, replySession);

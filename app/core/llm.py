@@ -22,6 +22,7 @@ def get_chat_model() -> ChatOpenAI:
         timeout=60,  # SDK 网络超时配置，不等同于整个请求绝对耗时上限。
         max_retries=1,  # 有限重试；不是业务操作失败后无限重试。
         use_responses_api=False,  # 使用上游兼容的 Chat Completions 协议。
+        stream_usage=True,  # 自定义上游默认不申请流式用量；显式开启才能统计主力Agent实际token。
     )
 
 

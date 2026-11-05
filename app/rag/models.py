@@ -1,24 +1,30 @@
 """按用户ch04-ddl.sql映射；真实建表执行该SQL，不自动改写既有表。"""
 
 from datetime import datetime
-from sqlalchemy import String, Text, DateTime, Enum, JSON, ForeignKey, Integer, func
+from sqlalchemy import String, Text, DateTime, Enum, JSON, ForeignKey, Integer, Index, func
 from sqlalchemy.orm import Mapped, mapped_column
 from app.models import Base, ID
+from app.learning.models import ReviewQueue
 
 
 # 此表记录真实聊天的拒答轮次；评估脚本不把测试问题写进这里。
 class LowConfidenceQuestion(Base):
     __tablename__ = 'low_confidence_questions'
+    __table_args__ = (Index('idx_matched_review_id', 'matched_review_id'),)
     id: Mapped[int] = mapped_column(ID, primary_key=True, autoincrement=True)
     conversation_id: Mapped[int | None] = mapped_column(
         ID, ForeignKey('conversations.id')
     )
-    # user_feedback是DDL预留值；本章前端点赞/点踩不调用数据库写入。
+    # Ch09启用第三入口；来源与当轮快照一起保留，模型标准化失败也不丢原话。
     raw_question: Mapped[str] = mapped_column(Text)
     source: Mapped[str] = mapped_column(
         Enum('retrieval_low_conf', 'self_check', 'user_feedback'), index=True
     )
     reason: Mapped[str | None] = mapped_column(Text)
+    retrieved_chunks: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    matched_review_id: Mapped[int | None] = mapped_column(
+        ID, ForeignKey('review_queue.id', name='fk_lcq_review', ondelete='SET NULL'), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), index=True
     )

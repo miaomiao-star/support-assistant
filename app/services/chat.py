@@ -1,6 +1,7 @@
 """单轮工具编排：选择一次 → 执行最多一个 → 无工具模型流式收敛。"""
 
 import asyncio
+from app.learning.confidence import snapshot
 import json
 import re
 from contextlib import aclosing
@@ -237,7 +238,13 @@ class ChatService:
             # 业务拒答才入池；超时、连接错误在上面/生成内部抛出，走SSE错误而不入池。
             if not outcome['useful']:
                 await self.rag.quality.low_confidence(
-                    conversation_id, user_text, outcome['source'], outcome['reason']
+                    conversation_id,
+                    user_text,
+                    outcome['source'],
+                    outcome['reason'],
+                    retrieved_chunks=snapshot(
+                        self.repo.latest_retrieval['ranked'], retrieved=True
+                    ),
                 )
             # citations是实际Prompt证据全集，cited才是正文引用的编号子集。
             yield dict(
